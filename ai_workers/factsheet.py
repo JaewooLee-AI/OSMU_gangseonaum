@@ -81,7 +81,7 @@ PRODUCT = Sheet(
     key="product",
     title="🧹 서비스·이용 정보",
     hint=(
-        "가사서비스·정리수납처럼 **독자가 이용하려고 검색해서 들어오는 글**에 채우세요. "
+        "가사서비스·정리수납·주간보호처럼 **독자가 이용하려고 검색해서 들어오는 글**에 채우세요. "
         "검색으로 들어온 사람이 요금과 신청 방법을 못 찾으면 바로 나가고, 네이버는 그 "
         "이탈을 순위에 반영합니다. **해당하는 항목만** 채우면 됩니다."
     ),
@@ -148,7 +148,16 @@ def is_brief_overall(pairs) -> bool:
     A post with two notice fields and five product fields has plenty to say;
     judging each sheet on its own would call it brief on the notice side and
     strip the length target from a post that needed it.
+
+    Only a post carrying *notice* facts can be brief. A service post with a
+    few 🧹 서비스·이용 정보 fields is not a short announcement — it is the
+    post a searcher reads to decide — and since the 글 유형 presets pre-fill
+    two or three of those fields, counting them here turned every 지원 제도
+    안내 into a "brief notice" and dropped its length target (measured: a
+    노출 우선 서울형 가사서비스 post came out at 639자).
     """
+    if not any(sheet.key == "notice" and clean(sheet, given) for sheet, given in pairs):
+        return False
     total = sum(len(clean(sheet, given)) for sheet, given in pairs)
     return 0 < total < BRIEF_FIELD_COUNT
 

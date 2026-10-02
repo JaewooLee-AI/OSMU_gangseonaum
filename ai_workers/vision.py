@@ -50,9 +50,43 @@ from PIL import Image
 from ai_workers.multi_llm_router import get_vision_vendor, google_client, load_vendor_config
 from core import repo, storage
 
+# 사진 설명에 이 표시가 붙으면 개인정보가 찍힌 사진입니다 — content_writer가 리포트로 올립니다.
+PRIVACY_MARKER = "[개인정보 주의:"
+
+
+def privacy_flags(captions: dict) -> dict:
+    """{path: what is visible} for photos the caption model flagged.
+
+    Photos from inside a customer's home are this channel's best material and
+    its biggest privacy risk: a parcel label or a mail stack carries a name
+    and a 동호수, and a family photo on the shelf carries faces. The text
+    guardrail never sees pixels, so the vision call is the only place this
+    can be caught. Report-only: blurring is the staffer's job before posting.
+    """
+    flagged = {}
+    for path, caption in (captions or {}).items():
+        caption = str(caption or "")
+        at = caption.find(PRIVACY_MARKER)
+        if at >= 0:
+            detail = caption[at + len(PRIVACY_MARKER):].split("]", 1)[0].strip()
+            flagged[path] = detail or "개인정보"
+    return flagged
+
+
+def strip_privacy_marker(caption: str) -> str:
+    """The caption as the writers should see it — the marker is for the
+    report, not something the draft should mention."""
+    caption = str(caption or "")
+    at = caption.find(PRIVACY_MARKER)
+    if at < 0:
+        return caption
+    end = caption.find("]", at)
+    return (caption[:at] + (caption[end + 1:] if end >= 0 else "")).strip()
+
+
 # Bump when CAPTION_PROMPT changes semantically — old cache entries then stop
 # being served instead of silently mixing two prompt generations.
-PROMPT_VERSION = "v1-objective"
+PROMPT_VERSION = "v2-privacy"
 
 # `caption_max_tokens` is the ceiling for ONE caption. It has to cover the
 # length CAPTION_PROMPT actually asks for (40~70 Korean characters), and
@@ -71,22 +105,22 @@ QUALITY_PRESETS = {
         "label": "절약 (권장)",
         "max_edge": 384,
         "jpeg_quality": 70,
-        "caption_max_tokens": 80,
+        "caption_max_tokens": 100,
         "hint": "Gemini 258토큰 / OpenAI 85토큰 고정 구간. 사물·색상·장소 식별에는 충분합니다.",
     },
     "balanced": {
         "label": "균형",
         "max_edge": 768,
         "jpeg_quality": 78,
-        "caption_max_tokens": 110,
+        "caption_max_tokens": 130,
         "hint": "작은 글씨(라벨, 안내판)까지 읽어야 할 때.",
     },
     "quality": {
         "label": "고화질",
         "max_edge": 1024,
         "jpeg_quality": 85,
-        "caption_max_tokens": 150,
-        "hint": "자수·금박 디테일처럼 질감 묘사가 중요한 촬영본용. 토큰 비용이 가장 큽니다.",
+        "caption_max_tokens": 170,
+        "hint": "청소 전후 비교처럼 세부 묘사가 중요한 사진용. 토큰 비용이 가장 큽니다.",
     },
 }
 
@@ -107,8 +141,11 @@ MAX_IMAGES_PER_CALL = 6  # keeps a single request's image payload bounded
 
 CAPTION_PROMPT = (
     "각 사진에 실제로 보이는 것만 한국어로 묘사하세요. 사물, 색상, 소재·질감, 장소/배경, "
-    "사람의 유무와 행동, 사진 속 글자를 우선 언급합니다. 추측·감상·마케팅 문구는 쓰지 마세요. "
-    "사진 1장당 한 문장, 40자~70자로 짧게 씁니다.\n"
+    "사람의 유무와 행동, 간판·안내문처럼 공개된 글자를 우선 언급합니다. 추측·감상·마케팅 문구는 "
+    "쓰지 마세요. 사진 1장당 한 문장, 40자~70자로 짧게 씁니다.\n"
+    "사람 이름·주소·아파트 동호수·전화번호·차량번호가 적힌 택배 송장·우편물·명패 등이 보이거나, "
+    "얼굴을 알아볼 수 있는 사람이 찍혀 있으면 그 글자는 옮겨 적지 말고 문장 끝에 "
+    f"{PRIVACY_MARKER} 무엇이 보이는지] 를 붙이세요 (예: {PRIVACY_MARKER} 택배 송장]).\n"
     '반드시 아래 JSON 형식으로만 응답하세요: {"captions": ["1번 사진 설명", "2번 사진 설명"]}'
 )
 

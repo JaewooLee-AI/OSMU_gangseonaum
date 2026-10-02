@@ -26,7 +26,9 @@ HASHTAG_SYSTEM_PROMPT = (
 )
 
 
-def write_naver_hashtags(title: str, content: str, target_keywords: list[str], vendor: str) -> list[str]:
+def write_naver_hashtags(
+    title: str, content: str, target_keywords: list[str], vendor: str, service_areas: list[str] | None = None
+) -> list[str]:
     """Returns a list of "#tag" strings. Best-effort — callers must not let a
     failure here fail the whole draft, since these are a copy/paste aid for
     the publish popup, not the post body itself.
@@ -40,7 +42,13 @@ def write_naver_hashtags(title: str, content: str, target_keywords: list[str], v
         f"\n\n[이 글이 다루는 검색 키워드 - 태그에 포함] {', '.join(target_keywords)}"
         if target_keywords else ""
     )
-    prompt = f"[제목]\n{title}\n\n[본문]\n{content[:3000]}{keyword_hint}"
+    # 동네 이름은 글에 실제로 나온 것만 태그로 씁니다 — 목록 전체를 태그로 깔면 글과
+    # 무관한 지역 태그가 붙습니다 (발행 태그가 브랜드 키워드로 채워지던 문제와 같은 종류).
+    mentioned = [a for a in (service_areas or []) if a and a in f"{title}\n{content}"]
+    area_hint = (
+        f"\n\n[글에 나온 서비스 지역 - 지역 태그 1~2개로 활용] {', '.join(mentioned)}" if mentioned else ""
+    )
+    prompt = f"[제목]\n{title}\n\n[본문]\n{content[:3000]}{keyword_hint}{area_hint}"
     raw = generate_text(vendor=vendor, prompt=prompt, system=HASHTAG_SYSTEM_PROMPT, max_tokens=400, note="naver-hashtags")
     try:
         cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())

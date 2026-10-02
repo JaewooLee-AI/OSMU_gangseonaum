@@ -601,7 +601,7 @@ def _build_searchad_section(page: ft.Page, scale: float, rebuild) -> ft.Control:
     )
 
 
-def _build_sweep_wizard(page: ft.Page, scale: float, rebuild) -> ft.Control:
+def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adder: bool = True) -> ft.Control:
     naver_saved = repo.get_naver_api_settings()
     ad_saved = repo.get_searchad_settings()
     keys_ok = bool(naver_saved and ad_saved)
@@ -610,7 +610,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild) -> ft.Control:
     controls: list[ft.Control] = []
 
     if not keys_ok:
-        controls.append(_warn_box("위에서 두 API 키를 모두 등록하면 아래 버튼이 활성화됩니다.", scale))
+        controls.append(_warn_box("⚙️ 설정 → 🔍 네이버 API에서 두 API 키를 모두 등록하면 아래 버튼이 활성화됩니다.", scale))
 
     maintain: list[ft.Control] = []
     if not pool:
@@ -796,7 +796,13 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild) -> ft.Control:
 
         def _work() -> None:
             try:
-                found = keyword_research.sweep_candidates(seeds, min_volume=min_v, max_volume=max_v)
+                kit = repo.get_brand_kit()
+                areas = list(kit.get("service_areas") or []) + list(
+                    (kit.get("house_voice") or {}).get("service_areas") or []
+                )
+                found = keyword_research.sweep_candidates(
+                    seeds, min_volume=min_v, max_volume=max_v, local_areas=areas,
+                )
             except Exception as exc:  # noqa: BLE001
                 find_status.value = f"❌ {exc}"
                 find_status.color = "#B3261E"
@@ -1049,6 +1055,8 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild) -> ft.Control:
         ],
         spacing=8,
     )
+    if not show_category_adder:
+        return ft.Column([pick, ft.Divider(), keep], spacing=12)
     add = _build_category_adder(page, scale, rebuild, keys_ok, pool)
     return ft.Column([pick, ft.Divider(), add, ft.Divider(), keep], spacing=12)
 
@@ -1299,7 +1307,7 @@ def _build_keyword_diagnostic_section(page: ft.Page, scale: float) -> ft.Control
     if not pool:
         body.append(ft.Text("브랜드 킷에 SEO 키워드가 없습니다.", size=fs(12, scale)))
     elif not naver_saved:
-        body.append(ft.Text("먼저 위에서 키를 등록하세요.", size=fs(12, scale)))
+        body.append(ft.Text("먼저 ⚙️ 설정 → 🔍 네이버 API에서 키를 등록하세요.", size=fs(12, scale)))
     else:
         body.append(ft.Text(f"대상 {len(pool)}개: {', '.join(pool)}", size=fs(12, scale)))
         body.append(run_button)
@@ -1309,31 +1317,42 @@ def _build_keyword_diagnostic_section(page: ft.Page, scale: float) -> ft.Control
 
 
 def _build_naver_tab(page: ft.Page, scale: float) -> ft.Control:
-    wizard_box = ft.Container()
+    # 키워드 고르기·분야 추가·수치 유지·진단은 🔑 SEO 키워드 화면(flet_app/views/seo_view.py)으로
+    # 옮겼습니다. 여기는 키를 넣는 곳만 남깁니다 — rebuild는 키 저장 후 이 탭을 다시 그립니다.
+    keys_box = ft.Container()
 
     def rebuild() -> None:
-        wizard_box.content = _build_sweep_wizard(page, scale, rebuild)
-        wizard_box.update()
+        keys_box.content = _naver_key_sections(page, scale, rebuild)
+        keys_box.update()
 
-    wizard_box.content = _build_sweep_wizard(page, scale, rebuild)
-
+    keys_box.content = _naver_key_sections(page, scale, rebuild)
     return ft.Column(
         [
             ft.Text(
                 "블로그·뉴스·카페 검색과 검색어트렌드, 절대 검색량·연관키워드 발굴을 담당합니다.",
                 size=fs(12, scale), color=BRAND_COLORS["text_muted"],
             ),
-            _build_api_hub_section(page, scale, rebuild),
+            keys_box,
             ft.Divider(),
-            _build_searchad_section(page, scale, rebuild),
-            ft.Divider(),
-            wizard_box,
-            ft.Divider(),
-            _build_keyword_diagnostic_section(page, scale),
+            _warn_box(
+                "🔑 SEO 키워드 고르기·동네 키워드 찾기·수치 유지는 왼쪽 메뉴의 [SEO 키워드] 화면으로 옮겼습니다.",
+                scale, color="#1B6E3C", bg="#E8F5E9",
+            ),
         ],
         spacing=10,
         scroll=ft.ScrollMode.AUTO,
         expand=True,
+    )
+
+
+def _naver_key_sections(page: ft.Page, scale: float, rebuild) -> ft.Control:
+    return ft.Column(
+        [
+            _build_api_hub_section(page, scale, rebuild),
+            ft.Divider(),
+            _build_searchad_section(page, scale, rebuild),
+        ],
+        spacing=10,
     )
 
 

@@ -188,7 +188,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
 
         started_at = time.monotonic()
         try:
-            results = search_news_by_keywords(all_keywords, int(limit_field.value))
+            results = search_news_by_keywords(
+                all_keywords, int(limit_field.value), brand_kit.get("news_exclude_terms") or []
+            )
         finally:
             # 캐시가 따뜻하면 검색이 1초도 안 걸려서 "진행 중" 표시가 뜨자마자
             # 사라진다 — 눈으로 인지하기 힘들 만큼 짧으면 최소 시간을 채워준다.
@@ -224,6 +226,11 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     controls += [
         ft.Text("검색 키워드 (브랜드 킷의 SEO 키워드 — 검색량 큰 순 3개 기본 선택)", size=fs(12, scale)),
         ft.Row(keyword_chips, wrap=True, spacing=6),
+        *([ft.Text(
+            "🚫 제외어가 들어간 기사는 결과에서 뺍니다: " + ", ".join(brand_kit.get("news_exclude_terms") or [])
+            + " (🧵 브랜드 킷에서 바꿀 수 있습니다)",
+            size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+        )] if brand_kit.get("news_exclude_terms") else []),
         extra_field,
         ft.Text("키워드별 기사 수", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
         limit_field,

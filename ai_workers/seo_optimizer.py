@@ -76,9 +76,37 @@ TITLE_REWRITE_SYSTEM_PROMPT = (
 )
 
 
+def _keyword_pattern(keyword: str) -> re.Pattern:
+    """'강서구 가사도우미' also matches '강서구가사도우미' — Naver treats the two
+    as one query (검색광고 strips the space; see keyword_research.normalize),
+    so a hashtag-style spelling in the body is the same keyword, not a miss."""
+    parts = [re.escape(p) for p in keyword.lower().split()]
+    return re.compile(r"\s*".join(parts))
+
+
 def count_keyword_occurrences(text: str, keywords: list[str]) -> dict[str, int]:
     lowered = text.lower()
-    return {kw: lowered.count(kw.lower()) for kw in keywords if kw}
+    return {kw: len(_keyword_pattern(kw).findall(lowered)) for kw in keywords if kw and kw.strip()}
+
+
+def drop_nested_keywords(keywords: list[str]) -> list[str]:
+    """Removes a keyword contained in another keyword of the same list.
+
+    A pool for a service business nests: '가사서비스' sits inside '서울형
+    가사서비스', '정부인증 가사서비스' and '가사서비스 요금'. Counting is by
+    substring, so as targets of the same post the two fight — every mention
+    of the longer one is also a mention of the shorter, the shorter is
+    reported 과다, and the density pass is told to cut it, which cuts the
+    longer target with it. Measured on a 서울형 바우처 paragraph: '가사서비스'
+    counted 8 (2 standalone) next to '서울형 가사서비스' 5. The longer keyword
+    already carries the shorter for search, so the shorter one gives up its
+    slot. Order is preserved.
+    """
+    squeezed = [(kw, kw.replace(" ", "").lower()) for kw in keywords]
+    return [
+        kw for kw, flat in squeezed
+        if not any(flat != other and flat in other for _, other in squeezed)
+    ]
 
 
 # What a visit from this keyword is worth to the business, relative to an
@@ -242,7 +270,10 @@ def select_target_keywords(
         ((kw, n) for kw, n in counts.items() if n > 0),
         key=lambda kv: (-_opportunity(kv[0], weights), -kv[1], -len(kv[0])),
     )
-    return [kw for kw, n in used if n >= min_mentions][:limit]
+    eligible = [kw for kw, n in used if n >= min_mentions]
+    # Nested keywords are deduplicated among the eligible ones only: a longer
+    # keyword the post never returned to must not evict the shorter one it does.
+    return drop_nested_keywords(eligible)[:limit]
 
 
 def check_keyword_density(

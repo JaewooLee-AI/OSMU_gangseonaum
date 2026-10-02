@@ -30,7 +30,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional
 
-from ai_workers import body_variety, content_mode
+from ai_workers import body_variety, content_mode, vision
 from ai_workers.guardrail import (
     apply_blacklist_dictionary,
     apply_guardrail_if_enabled,
@@ -38,6 +38,7 @@ from ai_workers.guardrail import (
     filter_certification_hashtags,
     remove_certification_overclaims,
 )
+from ai_workers.daangn_writer import write_daangn_post
 from ai_workers.instagram_caption_writer import write_instagram_caption
 from ai_workers.multi_llm_router import generate_text, get_configured_vendor
 from ai_workers.naver_hashtag_writer import write_naver_hashtags
@@ -71,6 +72,7 @@ from ai_workers.seo_optimizer import (
 )
 from ai_workers.shorts_writer import write_shorts_script
 from ai_workers.sns_validator import (
+    validate_daangn,
     validate_instagram,
     validate_naver_tags,
     validate_shorts,
@@ -129,6 +131,44 @@ INTENT_COVERAGE_FLOOR = 50
 _TITLE_MARKER_RE = re.compile(r"^\s*\[TITLE:\s*(.+?)\]\s*\n+", re.IGNORECASE)
 
 Progress = Optional[Callable[[str], None]]
+
+
+def _brand_kit_for(brand_kit: dict, campaign: dict) -> dict:
+    """The Brand Kit as this campaign should see it.
+
+    The kit holds two voices. The default — persona, tone, sample, service
+    areas, sub-brand — is 강서나눔통합돌봄센터's 주간보호·방문요양, the
+    business the SNS push exists for. 가사서비스 (우렁각시 홈서비스) is a
+    secondary voice in `house_voice`, used only by the [가사] post types.
+
+    Two voices, not one with exceptions: a 주간보호 post written in the
+    가사 voice (measured on the first live run) called the day-care centre a
+    side line of the housekeeping service, steered its title onto '가사돌봄'
+    and closed on the housekeeping phone number — and the prompt's brand
+    label said '(브랜드: 우렁각시 홈서비스)' on every care post. The stored
+    kit is never changed by this.
+    """
+    from ai_workers import post_types
+    from core import brand_seed
+
+    if post_types.voice_of(campaign.get("post_type")) != "house":
+        return brand_kit
+    voice = {**brand_seed.HOUSE_VOICE, **(brand_kit.get("house_voice") or {})}
+    kit = {**brand_kit, **{k: v for k, v in voice.items() if v}}
+    # 장기요양 제도 정보는 돌봄 글의 근거라 가사서비스 글에는 넣지 않습니다.
+    kit["core_facts"] = [
+        f for f in (brand_kit.get("core_facts") or [])
+        if not str(f).startswith(brand_seed.INFO_FACT_PREFIX)
+    ]
+    return kit
+
+
+def _captions_with_privacy(paths: List[str]):
+    """Photo captions for the writers, plus the photos flagged as showing
+    personal information (vision.privacy_flags) for the report."""
+    raw = caption_attachments(paths)
+    flags = vision.privacy_flags(raw)
+    return {path: vision.strip_privacy_marker(c) for path, c in raw.items()}, flags
 
 
 def _extract_generated_title(draft: str):
@@ -490,7 +530,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
         if not campaign:
             raise RuntimeError(f"campaign {campaign_id} not found")
 
-        brand_kit = repo.get_brand_kit()
+        brand_kit = _brand_kit_for(repo.get_brand_kit(), campaign)
         storage_file_paths = campaign.get("storage_file_paths") or []
         memo = (campaign.get("memo") or "").strip()
         given_title = (campaign.get("title") or "").strip()
@@ -532,7 +572,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
 
         # --- stage 1: photo captions (cached + batched) ---
         _report(progress, f"사진 {len(storage_file_paths)}장 분석 중…" if storage_file_paths else "첨부 사진 없음")
-        captions = caption_attachments(storage_file_paths)
+        captions, photo_privacy = _captions_with_privacy(storage_file_paths)
 
         # --- stage 2: the draft ---
         _report(progress, "블로그 본문 초안 작성 중…")
@@ -658,6 +698,15 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
         )
         if needs_title and title_eligible and mode["rewrite_title"]:
             title_missing_keywords = title_keyword_coverage(final_title, title_eligible)
+            # The title has room for one keyword, and it should be the best one.
+            # Offered every missing target, the candidate scorer (position,
+            # length, variety) has no idea which keyword is worth more, and on
+            # the first live run it put '정부인증 가사서비스' (70 searches a
+            # month) in the title over '서울형 가사서비스' (2,820). Targets are
+            # already ranked by opportunity, so when the top one is missing it
+            # is the only one offered.
+            if title_eligible[0] in title_missing_keywords:
+                title_missing_keywords = [title_eligible[0]]
             if title_missing_keywords:
                 _report(progress, "제목에 SEO 키워드 보강 중…")
                 # History is passed so the candidate scorer can reject a
@@ -715,6 +764,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             "fixed": bool(needs_title and title_missing_keywords),
         }
         report["title_variety"] = title_variety
+        report["photo_privacy"] = photo_privacy
 
         # --- stage 7: secondary channels ---
         # Shared with regenerate_sns so the first run and a later "SNS만 다시
@@ -799,7 +849,7 @@ def revise_content(
     previous_status = repo.begin_processing(campaign_id)
     try:
         vendor = get_configured_vendor()
-        brand_kit = repo.get_brand_kit()
+        brand_kit = _brand_kit_for(repo.get_brand_kit(), campaign)
         seo_keywords = brand_kit.get("seo_keywords") or []
         final_title = (campaign.get("title") or "").strip() or "제목 미정"
         storage_file_paths = campaign.get("storage_file_paths") or []
@@ -884,7 +934,9 @@ def revise_content(
 
         naver_hashtags = _safe(
             progress, "네이버 발행 태그 갱신 중…",
-            lambda: write_naver_hashtags(final_title, final_content, target_keywords, vendor),
+            lambda: write_naver_hashtags(
+                final_title, final_content, target_keywords, vendor, brand_kit.get("service_areas") or []
+            ),
             campaign.get("naver_hashtags") or [],
         )
         naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords))
@@ -894,11 +946,14 @@ def revise_content(
         # compliance/format results along with it. Carry them over, and say
         # plainly when they now describe an older body.
         previous = campaign.get("guardrail_report") or {}
-        for key in SNS_REPORT_KEYS:
+        for key in SNS_REPORT_KEYS + ("photo_privacy",):
             if key in previous:
                 report[key] = previous[key]
         report.setdefault("sns_checks", {})["naver_tags"] = tag_issues
-        has_sns = bool(campaign.get("instagram_caption") or campaign.get("x_content") or campaign.get("shorts_script"))
+        has_sns = bool(
+            campaign.get("instagram_caption") or campaign.get("x_content")
+            or campaign.get("shorts_script") or campaign.get("daangn_post")
+        )
         report["sns_stale"] = has_sns and (
             bool(previous.get("sns_stale")) or final_content.strip() != (campaign.get("content") or "").strip()
         )
@@ -944,6 +999,24 @@ SNS_CONCURRENCY = 2
 
 _SNS_SEGMENT = "\n<<<SEG>>>\n"
 
+# 브랜드 킷에서 켜고 끌 수 있는 보조 채널. 네이버 본문과 발행 태그는 항상 만듭니다.
+SNS_CHANNELS = {
+    "instagram": "📸 인스타그램",
+    "x": "𝕏 X 스레드",
+    "shorts": "🎬 쇼츠",
+    "daangn": "🥕 당근 소식",
+}
+
+
+def enabled_channels(brand_kit: dict) -> List[str]:
+    """Channels to generate. A channel switched off costs nothing — no
+    writer call and no audit call — which matters for a channel the company
+    doesn't post to: each one is two LLM requests on every generation."""
+    stored = brand_kit.get("enabled_channels")
+    if stored is None:
+        return list(SNS_CHANNELS)
+    return [key for key in SNS_CHANNELS if key in stored]
+
 
 def _sns_facts(final_content: str, notice_fields: dict, product_fields: dict) -> str:
     """What the SNS writers must agree with: the confirmed notice/product
@@ -974,7 +1047,9 @@ def _sns_facts(final_content: str, notice_fields: dict, product_fields: dict) ->
     return "\n\n".join(blocks)
 
 
-def _proofread_sns(instagram: dict, x_result: dict, shorts: dict, brand_kit: dict, vendor: str) -> List[Dict]:
+def _proofread_sns(
+    instagram: dict, x_result: dict, shorts: dict, brand_kit: dict, vendor: str, daangn: Optional[dict] = None
+) -> List[Dict]:
     """Spelling/spacing for all three SNS channels in **one** call.
 
     Proofreading used to run on the blog body only, so captions, tweets and
@@ -984,11 +1059,13 @@ def _proofread_sns(instagram: dict, x_result: dict, shorts: dict, brand_kit: dic
     the alignment is not). Returns the applied corrections for the report.
     """
     scenes = shorts.get("scenes") or []
+    daangn = daangn if daangn is not None else {}
     segments = (
         [instagram.get("caption") or ""]
         + list(x_result.get("tweets") or [])
         + [shorts.get("title") or "", shorts.get("hook") or ""]
         + [s.get("caption") or "" for s in scenes]
+        + [daangn.get("title") or "", daangn.get("body") or ""]
     )
     if not any(seg.strip() for seg in segments):
         return []
@@ -1006,19 +1083,28 @@ def _proofread_sns(instagram: dict, x_result: dict, shorts: dict, brand_kit: dic
     instagram["caption"] = parts[0]
     x_result["tweets"] = parts[1:1 + n_tweets]
     shorts["title"], shorts["hook"] = parts[1 + n_tweets], parts[2 + n_tweets]
-    for scene, caption in zip(scenes, parts[3 + n_tweets:]):
+    n_scenes = len(scenes)
+    for scene, caption in zip(scenes, parts[3 + n_tweets:3 + n_tweets + n_scenes]):
         scene["caption"] = caption
+    if daangn:
+        daangn["title"], daangn["body"] = parts[-2], parts[-1]
     return applied
 
 
-def _sns_fact_coverage(instagram: dict, x_result: dict, notice_fields: dict, product_fields: dict) -> Dict:
+def _sns_fact_coverage(
+    instagram: dict, x_result: dict, notice_fields: dict, product_fields: dict, daangn: Optional[dict] = None
+) -> Dict:
     """Which confirmed notice/product values each SNS post left out — the
     same measurement the blog body gets (factsheet.coverage). Report only: a
     caption doesn't have to carry every field, but the marketer should see
     that the date or price isn't there before posting it."""
     out = {}
     texts = {"instagram": instagram.get("caption") or "", "x": "\n".join(x_result.get("tweets") or [])}
+    if daangn and (daangn.get("body") or "").strip():
+        texts["daangn"] = f"{daangn.get('title') or ''}\n{daangn.get('body') or ''}"
     for channel, text in texts.items():
+        if not text.strip():
+            continue
         missing = []
         for sheet, given in ((factsheet.NOTICE, notice_fields), (factsheet.PRODUCT, product_fields)):
             cov = factsheet.coverage(sheet, text, given)
@@ -1048,45 +1134,54 @@ def _secondary_channels(
     was revised goes through exactly the same stages as the first run.
     """
     facts = _sns_facts(final_content, notice_fields, product_fields)
+    enabled = set(enabled_channels(brand_kit))
 
-    # The four writers are independent of each other, and each is 1~2
-    # sequential LLM round trips — run them concurrently so the slowest ones,
-    # not the sum of all four, set the wait. _safe keeps each one best-effort.
-    # Capped at SNS_CONCURRENCY rather than all four at once — see there.
+    # The writers are independent of each other, and each is 1~2 sequential
+    # LLM round trips — run them concurrently so the slowest ones, not the
+    # sum of all of them, set the wait. _safe keeps each one best-effort.
+    # Capped at SNS_CONCURRENCY rather than all at once — see there. A channel
+    # switched off in the Brand Kit is never submitted (no writer, no audit).
+    empty = {
+        "instagram": {"caption": "", "hashtags": []},
+        "x": {"tweets": [], "hashtags": []},
+        "shorts": {"title": "", "hook": "", "scenes": [], "hashtags": []},
+        "daangn": {"title": "", "body": ""},
+    }
+    jobs = {
+        "instagram": ("인스타그램 캡션 생성 중…", lambda: _guarded_instagram(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+        "x": ("X 스레드 생성 중…", lambda: _guarded_x(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+        "shorts": ("쇼츠 구성안 생성 중…", lambda: _guarded_shorts(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+        "daangn": ("당근 소식 생성 중…", lambda: _guarded_daangn(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+    }
     with ThreadPoolExecutor(max_workers=SNS_CONCURRENCY) as pool:
-        ig_future = pool.submit(
-            _safe, progress, "인스타그램 캡션 생성 중…",
-            lambda: _guarded_instagram(
-                seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
-            ),
-            {"caption": "", "hashtags": []},
-        )
-        x_future = pool.submit(
-            _safe, progress, "X 스레드 생성 중…",
-            lambda: _guarded_x(
-                seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
-            ),
-            {"tweets": [], "hashtags": []},
-        )
-        shorts_future = pool.submit(
-            _safe, progress, "쇼츠 구성안 생성 중…",
-            lambda: _guarded_shorts(
-                seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
-            ),
-            {"title": "", "hook": "", "scenes": [], "hashtags": []},
-        )
+        futures = {
+            key: pool.submit(_safe, progress, message, fn, empty[key])
+            for key, (message, fn) in jobs.items() if key in enabled
+        }
         tags_future = pool.submit(
             _safe, progress, "네이버 발행 태그 생성 중…",
-            lambda: write_naver_hashtags(final_title, final_content, list(target_keywords or []), vendor),
+            lambda: write_naver_hashtags(
+                final_title, final_content, list(target_keywords or []), vendor,
+                brand_kit.get("service_areas") or [],
+            ),
             [],
         )
-        instagram = ig_future.result()
-        x_result = x_future.result()
-        shorts = shorts_future.result()
+        results = {key: (futures[key].result() if key in futures else dict(empty[key])) for key in empty}
         naver_hashtags = tags_future.result()
+    instagram, x_result, shorts, daangn = (
+        results["instagram"], results["x"], results["shorts"], results["daangn"]
+    )
 
     _report(progress, "SNS 맞춤법·오탈자 교정 중…")
-    sns_proofread = _proofread_sns(instagram, x_result, shorts, brand_kit, vendor)
+    sns_proofread = _proofread_sns(instagram, x_result, shorts, brand_kit, vendor, daangn)
 
     # --- platform format checks ---
     # The writers are only *told* the limits. Verify: an over-long tweet is
@@ -1099,26 +1194,35 @@ def _secondary_channels(
     # 컴플라이언스 요약은 리포트 전용이라 DB 컬럼(shorts_script)에 들어가기 전에 떼어냅니다.
     shorts_compliance = shorts.pop("compliance", None) or {"checked": False}
     shorts, shorts_issues = validate_shorts(shorts)
+    daangn_compliance = daangn.pop("compliance", None) or {"checked": False}
+    daangn, daangn_issues = validate_daangn(daangn)
     naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords or []))
 
-    fields = {
-        "instagram_caption": instagram["caption"],
-        "instagram_hashtags": instagram["hashtags"],
-        "x_content": x_result["tweets"],
-        "x_hashtags": x_result["hashtags"],
-        "naver_hashtags": naver_hashtags,
-        "shorts_script": shorts,
+    # 꺼진 채널은 덮어쓰지 않습니다 — 예전에 만든 내용이 있으면 그대로 남습니다.
+    channel_fields = {
+        "instagram": {"instagram_caption": instagram["caption"], "instagram_hashtags": instagram["hashtags"]},
+        "x": {"x_content": x_result["tweets"], "x_hashtags": x_result["hashtags"]},
+        "shorts": {"shorts_script": shorts},
+        "daangn": {"daangn_post": daangn},
     }
+    fields = {"naver_hashtags": naver_hashtags}
+    for key in enabled:
+        fields.update(channel_fields[key])
     report = {
-        "sns_checks": {"x": x_issues, "instagram": ig_issues, "shorts": shorts_issues, "naver_tags": tag_issues},
+        "sns_checks": {
+            "x": x_issues, "instagram": ig_issues, "shorts": shorts_issues,
+            "daangn": daangn_issues, "naver_tags": tag_issues,
+        },
         # 형식 검증과는 별개입니다 — 이건 컴플라이언스 위반이 실제로 남아 있는지입니다.
         "sns_compliance": {
             "instagram": instagram.get("compliance") or {"checked": False},
             "x": x_result.get("compliance") or {"checked": False},
             "shorts": shorts_compliance,
+            "daangn": daangn_compliance,
         },
         "sns_proofread": sns_proofread,
-        "sns_fact_gaps": _sns_fact_coverage(instagram, x_result, notice_fields, product_fields),
+        "sns_fact_gaps": _sns_fact_coverage(instagram, x_result, notice_fields, product_fields, daangn),
+        "sns_channels": sorted(enabled),
         "sns_stale": False,
     }
     return fields, report
@@ -1126,7 +1230,7 @@ def _secondary_channels(
 
 # Report entries that describe the SNS channels rather than the blog body —
 # carried over when only the body is revised (see revise_content).
-SNS_REPORT_KEYS = ("sns_checks", "sns_compliance", "sns_proofread", "sns_fact_gaps")
+SNS_REPORT_KEYS = ("sns_checks", "sns_compliance", "sns_proofread", "sns_fact_gaps", "sns_channels")
 
 
 def regenerate_sns(campaign_id: str, progress: Progress = None) -> Dict:
@@ -1142,14 +1246,15 @@ def regenerate_sns(campaign_id: str, progress: Progress = None) -> Dict:
     try:
         vendor = get_configured_vendor()
         campaign = repo.get_campaign(campaign_id)
-        brand_kit = repo.get_brand_kit()
+        brand_kit = _brand_kit_for(repo.get_brand_kit(), campaign)
         report = dict(campaign.get("guardrail_report") or {})
         content = campaign.get("content") or ""
         title = (campaign.get("title") or "").strip() or "제목 미정"
         if not content.strip():
             raise RuntimeError("본문이 없습니다. 먼저 초안을 생성하세요.")
 
-        captions = caption_attachments(campaign.get("storage_file_paths") or [])
+        captions, photo_privacy = _captions_with_privacy(campaign.get("storage_file_paths") or [])
+        report["photo_privacy"] = photo_privacy
         memo = (campaign.get("memo") or "").strip()
         sns_fields, sns_report = _secondary_channels(
             memo or title, list(captions.values()), title, content, brand_kit, vendor,
@@ -1273,6 +1378,37 @@ def _guarded_instagram(
     )
     (result["caption"],), result["hashtags"] = _finalize_sns(
         guarded, [guarded["final_text"]], result.get("hashtags") or [], brand_kit
+    )
+    result["compliance"] = _compliance_summary(guarded)
+    return result
+
+
+def _guarded_daangn(
+    note: str, caption_values: List[str], brand_kit: dict, vendor: str,
+    notice_fields: Optional[dict] = None, product_fields: Optional[dict] = None,
+    facts: str = "",
+) -> dict:
+    """Same audit as the Instagram caption. Title and body are audited in one
+    call with the delimiter the Shorts path uses, and fall back to dictionary
+    substitution if the model doesn't return both segments intact."""
+    result = write_daangn_post(note, caption_values, brand_kit, vendor, facts)
+    segments = [result.get("title", ""), result.get("body", "")]
+    if not any(seg.strip() for seg in segments) or not brand_kit.get("guardrail_enabled", True):
+        result["compliance"] = _compliance_summary({})
+        return result
+
+    guarded = apply_guardrail_if_enabled(
+        _SHORTS_DELIMITER.join(segments), brand_kit, vendor, notice_fields, product_fields
+    )
+    parts = [p.strip() for p in guarded["final_text"].split(_SHORTS_DELIMITER.strip())]
+    if len(parts) == 2:
+        result["title"], result["body"] = parts
+    else:
+        blacklist = brand_kit.get("blacklist_map", {})
+        result["title"] = apply_blacklist_dictionary(result.get("title", ""), blacklist)[0]
+        result["body"] = apply_blacklist_dictionary(result.get("body", ""), blacklist)[0]
+    (result["title"], result["body"]), _tags = _finalize_sns(
+        guarded, [result["title"], result["body"]], [], brand_kit
     )
     result["compliance"] = _compliance_summary(guarded)
     return result

@@ -64,6 +64,7 @@ from flet_app.views import (  # noqa: E402
     dashboard_view,
     naver_publish_view,
     news_curation_view,
+    seo_view,
     settings_view,
     workbench_view,
 )
@@ -74,10 +75,13 @@ DESTINATIONS = [
     (ft.Icons.EDIT_OUTLINED, ft.Icons.EDIT, "워크벤치", workbench_view),
     (ft.Icons.ARTICLE_OUTLINED, ft.Icons.ARTICLE, "뉴스 큐레이션", news_curation_view),
     (ft.Icons.STYLE_OUTLINED, ft.Icons.STYLE, "브랜드 킷", brand_kit_view),
+    (ft.Icons.KEY_OUTLINED, ft.Icons.KEY, "SEO 키워드", seo_view),
     (ft.Icons.SEND_OUTLINED, ft.Icons.SEND, "네이버 게시", naver_publish_view),
     (ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, "설정 · 토큰", settings_view),
 ]
-DEFAULT_INDEX = 3  # 🧵 브랜드 킷
+# 대시보드 — 이번 달 추천 주제와 게시 주기가 있는, 매일 여는 화면입니다. (브랜드 킷은
+# 처음 세팅할 때 한 번 손보는 화면이라 시작 화면으로 두지 않습니다.)
+DEFAULT_INDEX = 0
 WORKBENCH_INDEX = 1  # DESTINATIONS 안 "워크벤치" 위치 — state.navigate_to_workbench가 씀
 
 

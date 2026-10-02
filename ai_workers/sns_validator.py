@@ -293,3 +293,40 @@ def validate_naver_tags(tags: List[str], fallback_keywords: List[str]) -> Tuple[
                 "message": f"발행 태그가 {len(out)}개뿐입니다({NAVER_TAG_MIN}~{NAVER_TAG_MAX}개 권장). 직접 추가하세요.",
             })
     return out, issues
+
+
+# 당근 비즈프로필 '소식'. 공식 글자 수 한도를 근거로 둔 값이 아니라, 동네 이웃이
+# 피드에서 끝까지 읽는 분량으로 잡은 작성 기준입니다 — 그래서 자르지 않고 알리기만 합니다.
+DAANGN_TITLE_MAX = 30
+DAANGN_BODY_MIN = 150
+DAANGN_BODY_MAX = 700
+_HASHTAG_RE = re.compile(r"(?<!\S)#[^\s#]+")
+
+
+def validate_daangn(post: dict) -> Tuple[dict, List[Dict]]:
+    """Title/body length and stray hashtags for a 당근 소식 post.
+
+    Hashtags are removed outright: 당근 소식 is read as a neighbour's notice,
+    not discovered by tag, and a trailing '#가사도우미 #청소' block reads as an
+    ad pasted in from another channel.
+    """
+    post = dict(post or {})
+    issues: List[Dict] = []
+    title = (post.get("title") or "").strip()
+    body = (post.get("body") or "").strip()
+    if not title and not body:
+        return post, issues
+
+    stripped = _HASHTAG_RE.sub("", body)
+    if stripped != body:
+        body = re.sub(r"[ \t]{2,}", " ", stripped)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        issues.append({"level": "fixed", "message": "당근 소식 본문의 해시태그를 뺐습니다 (당근은 태그로 노출되지 않습니다)."})
+    if len(title) > DAANGN_TITLE_MAX:
+        issues.append({"level": "warn", "message": f"당근 소식 제목이 {len(title)}자입니다 — {DAANGN_TITLE_MAX}자 안쪽이 피드에서 잘리지 않습니다."})
+    if len(body) > DAANGN_BODY_MAX:
+        issues.append({"level": "warn", "message": f"당근 소식 본문이 {len(body)}자로 깁니다 — {DAANGN_BODY_MAX}자 안쪽을 권장합니다."})
+    elif body and len(body) < DAANGN_BODY_MIN:
+        issues.append({"level": "warn", "message": f"당근 소식 본문이 {len(body)}자로 짧습니다 — 무엇을, 얼마에, 어떻게 신청하는지가 들어갔는지 확인하세요."})
+    post["title"], post["body"] = title, body
+    return post, issues

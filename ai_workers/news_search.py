@@ -167,10 +167,19 @@ def _naver_news_api(keyword: str, max_results: int) -> list[dict]:
     return articles[:max_results]
 
 
-def search_news_by_keywords(keywords: list[str], limit_per_keyword: int = 2) -> list[dict]:
+def search_news_by_keywords(
+    keywords: list[str], limit_per_keyword: int = 2, exclude_terms: list[str] | None = None
+) -> list[dict]:
     """Searches Google News + Naver News for each keyword, dedups against
     URLs already queued in osmu_campaigns, and dedups results against each
-    other by URL."""
+    other by URL.
+
+    `exclude_terms` (Brand Kit `news_exclude_terms`) drops articles whose
+    title or summary carries one of them, spacing ignored — the brand's
+    keywords are generic nouns ('가사도우미') that also headline policy
+    debates the brand should not be newsjacking.
+    """
+    blocked = [t.replace(" ", "") for t in (exclude_terms or []) if t and t.strip()]
     known_urls = repo.list_known_source_urls()
     seen_urls = set(known_urls)
     results = []
@@ -181,6 +190,9 @@ def search_news_by_keywords(keywords: list[str], limit_per_keyword: int = 2) -> 
         ):
             url = article.get("url")
             if not url or url in seen_urls:
+                continue
+            text = f"{article.get('title', '')} {article.get('summary', '')}".replace(" ", "")
+            if any(term in text for term in blocked):
                 continue
             seen_urls.add(url)
             article["matched_keyword"] = keyword

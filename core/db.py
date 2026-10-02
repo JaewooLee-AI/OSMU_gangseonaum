@@ -95,6 +95,18 @@ create table if not exists brand_kit (
     non_target_keywords   text not null default '[]',
     -- Fallback for campaigns.content_mode — see ai_workers/content_mode.py.
     default_content_mode      text not null default 'balanced',
+    -- 서비스 지역(구·동). 동네 키워드 후보와 지역 해시태그의 재료입니다.
+    service_areas             text not null default '[]',
+    -- 🧹 서비스·이용 정보 시트의 기본값 — 워크벤치 [브랜드 킷 기본값 채우기]가 씁니다.
+    product_defaults          text not null default '{}',
+    -- 🧓 주간보호·방문요양 글(글 유형 'care')의 서비스·이용 정보 기본값.
+    care_defaults             text not null default '{}',
+    -- 가사서비스 글의 보조 화자 {sub_brand, persona, tone_and_manner, few_shot_samples, service_areas}.
+    house_voice               text not null default '{}',
+    -- 뉴스 큐레이션에서 빼고 볼 기사 제목 단어.
+    news_exclude_terms        text not null default '[]',
+    -- 함께 생성할 보조 채널. 끈 채널은 생성 호출 자체를 하지 않습니다.
+    enabled_channels          text not null default '["instagram", "x", "shorts", "daangn"]',
     blacklist_map             text not null default '{}',
     default_generation_vendor text,
     vision_vendor             text,
@@ -124,6 +136,9 @@ create table if not exists campaigns (
     -- back to the default for anything it doesn't recognise, and a rejected
     -- INSERT would be a worse failure than an unknown mode.
     content_mode        text,
+    -- 글 유형 키 (ai_workers/post_types.py). 화면 기본값과 주제 캘린더 추적용이며,
+    -- 생성 로직은 이 값이 아니라 실제 입력(모드·시트)을 봅니다.
+    post_type           text,
     -- 공지·모집 글의 일시/장소/비용/신청 방법 (JSON 오브젝트, 빈 값은 저장하지
     -- 않음). 비어 있으면 일반 글입니다 — 별도 유형 플래그를 두지 않는 이유는
     -- ai_workers/factsheet.py 참고.
@@ -141,7 +156,11 @@ create table if not exists campaigns (
     x_hashtags          text not null default '[]',
     naver_hashtags      text not null default '[]',
     shorts_script       text,
+    -- 당근 비즈프로필 소식 {"title", "body"} — ai_workers/daangn_writer.py.
+    daangn_post         text,
     publish_error       text,
+    -- 게시 완료로 바뀐 시각. updated_at은 편집 때마다 바뀌어 게시 주기 계산에 못 씁니다.
+    published_at        text,
     created_at          text not null default (datetime('now')),
     updated_at          text not null default (datetime('now'))
 );
@@ -317,11 +336,20 @@ _ADDED_COLUMNS = {
         "content_mode": "text",
         "notice_fields": "text not null default '{}'",
         "product_fields": "text not null default '{}'",
+        "daangn_post": "text",
+        "published_at": "text",
+        "post_type": "text",
     },
     "brand_kit": {
         "keyword_weights": "text not null default '{}'",
         "non_target_keywords": "text not null default '[]'",
         "default_content_mode": "text not null default 'balanced'",
+        "service_areas": "text not null default '[]'",
+        "product_defaults": "text not null default '{}'",
+        "care_defaults": "text not null default '{}'",
+        "house_voice": "text not null default '{}'",
+        "news_exclude_terms": "text not null default '[]'",
+        "enabled_channels": """text not null default '["instagram", "x", "shorts", "daangn"]'""",
     },
 }
 

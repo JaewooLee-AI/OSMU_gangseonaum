@@ -24,6 +24,7 @@ _CAMPAIGN_JSON_COLS = {
     "x_hashtags": [],
     "naver_hashtags": [],
     "shorts_script": None,
+    "daangn_post": None,
 }
 
 _BRAND_KIT_JSON_COLS = {
@@ -34,6 +35,12 @@ _BRAND_KIT_JSON_COLS = {
     "keyword_weights": {},
     "non_target_keywords": [],
     "blacklist_map": {},
+    "service_areas": [],
+    "product_defaults": {},
+    "care_defaults": {},
+    "house_voice": {},
+    "news_exclude_terms": [],
+    "enabled_channels": ["instagram", "x", "shorts", "daangn"],
 }
 
 _CAMPAIGN_BOOL_COLS = ("guardrail_passed",)
@@ -203,6 +210,7 @@ def insert_campaign(
     memo: Optional[str] = None,
     status: str = "awaiting_media",
     source_title: Optional[str] = None,
+    **extra,
 ) -> Dict[str, Any]:
     campaign_id = uuid.uuid4().hex
     with get_conn() as conn:
@@ -213,6 +221,8 @@ def insert_campaign(
             """,
             (campaign_id, source_type, source_url, source_title, title, memo, status),
         )
+    if extra:
+        update_campaign(campaign_id, **extra)
     return get_campaign(campaign_id)
 
 
@@ -221,11 +231,53 @@ def update_campaign(campaign_id: str, **fields) -> None:
         return
     encoded = _encode(fields, _CAMPAIGN_JSON_COLS, _CAMPAIGN_BOOL_COLS)
     assignments = ", ".join(f"{k} = ?" for k in encoded)
+    # 게시 완료로 처음 바뀌는 순간을 남깁니다 — 다시 게시해도 처음 시각을 유지합니다.
+    if fields.get("status") == "published" and "published_at" not in fields:
+        assignments += ", published_at = coalesce(published_at, datetime('now'))"
     with get_conn() as conn:
         conn.execute(
             f"update campaigns set {assignments}, updated_at = datetime('now') where id = ?",
             tuple(encoded.values()) + (campaign_id,),
         )
+
+
+def publish_stats() -> Dict[str, Any]:
+    """게시 주기 — 최근 7일·30일 게시 수와 마지막 게시 후 지난 일수.
+
+    published_at이 없는 예전 게시물(이 컬럼이 생기기 전)은 updated_at으로 대신합니다.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            with p as (
+                select coalesce(published_at, updated_at) as ts from campaigns where status = 'published'
+            )
+            select
+                sum(case when ts >= datetime('now', '-7 days') then 1 else 0 end) as last7,
+                sum(case when ts >= datetime('now', '-30 days') then 1 else 0 end) as last30,
+                julianday('now') - julianday(max(ts)) as days_since,
+                count(*) as total
+            from p
+            """
+        ).fetchone()
+    return {
+        "last7": row["last7"] or 0,
+        "last30": row["last30"] or 0,
+        "days_since": row["days_since"],
+        "total": row["total"] or 0,
+    }
+
+
+def used_topic_titles() -> set:
+    """주제 캘린더에서 이미 글로 만든 주제 — 삭제한 글의 주제도 다시 권하지 않도록
+    app_state에 따로 남깁니다(title_history와 같은 이유)."""
+    return set((get_app_state("used_topics") or {}).get("titles") or [])
+
+
+def mark_topic_used(title: str) -> None:
+    titles = used_topic_titles()
+    titles.add(title)
+    set_app_state("used_topics", {"titles": sorted(titles)})
 
 
 class CampaignBusyError(RuntimeError):
@@ -278,7 +330,10 @@ def mark_sns_stale(campaign_id: str) -> None:
     if not campaign:
         return
     report = dict(campaign.get("guardrail_report") or {})
-    if not (campaign.get("instagram_caption") or campaign.get("x_content") or campaign.get("shorts_script")):
+    if not (
+        campaign.get("instagram_caption") or campaign.get("x_content")
+        or campaign.get("shorts_script") or campaign.get("daangn_post")
+    ):
         return
     if report.get("sns_stale"):
         return

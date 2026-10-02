@@ -35,7 +35,22 @@ CAPTION_SYSTEM_PROMPT_BASE = (
 def build_system_prompt(brand_kit: dict) -> str:
     """Reuses persona/tone/glossary but intentionally skips seo_keywords —
     Naver keyword targets don't belong in an Instagram caption."""
-    return "\n\n".join([CAPTION_SYSTEM_PROMPT_BASE] + brand_voice_blocks(brand_kit))
+    return "\n\n".join([CAPTION_SYSTEM_PROMPT_BASE] + brand_voice_blocks(brand_kit) + area_block(brand_kit))
+
+
+def area_block(brand_kit: dict) -> List[str]:
+    """Local hashtags. For a neighbourhood service the account's reach is
+    strangers nearby, and #동네이름 / #동네+서비스 tags are how they find it —
+    a caption tagged only #청소 #정리 competes with the whole country."""
+    areas = brand_kit.get("service_areas") or []
+    if not areas:
+        return []
+    return [
+        "[서비스 지역 — 지역 해시태그] " + ", ".join(areas) + "\n"
+        "해시태그에 지역 태그를 2~3개 넣으세요. 메모나 본문에 나온 동네가 있으면 그 동네를 우선 "
+        "쓰고(예: #화곡동, #화곡동가사도우미), 없으면 구 단위(예: #강서구가사도우미)로 씁니다. "
+        "위 목록 밖의 지역 태그는 달지 마세요."
+    ]
 
 
 def _parse_response(raw: str, fallback_text: str) -> dict:

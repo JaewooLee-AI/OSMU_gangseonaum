@@ -43,6 +43,13 @@ INTENT_GROUPS = {
 # 'irrelevant' and 'unwinnable' call for different follow-up.
 MAX_DOCS_PER_SEARCH = 100
 
+# 동네 이름이 붙은 키워드('강서구 주간보호센터')는 위 기준으로 재면 안 됩니다. 블로그 문서 수는
+# '강서구'와 '주간보호센터'가 *따로* 들어간 글까지 세므로, 실제로 그 동네·그 서비스를 다룬 경쟁
+# 글보다 훨씬 크게 나옵니다. 2026-10-03 실측: 강서구 주간보호센터 123, 강서구 방문요양 137,
+# 강서구 데이케어센터 234, 화곡동 주간보호센터 331 — 100 기준이면 [새로 고르기]를 적용하는
+# 순간 이 지역 키워드가 전부 '경쟁 과다'로 빠졌습니다. 동네 이름으로 시작하는 키워드만 이 기준을 씁니다.
+LOCAL_MAX_DOCS_PER_SEARCH = 1000
+
 # Naver masks any per-device count under ten, which `_parse_count` records as
 # 5 — so a keyword nobody searches on either device lands at exactly 10, not
 # 0. Anything at or below that floor is unmeasurable rather than small, and
@@ -106,6 +113,12 @@ def _brand_context() -> str:
         f"업종: {kit.get('industry') or '-'}\n"
         f"핵심 사실:\n" + "\n".join(f"- {f}" for f in facts[:15])
     )
+
+
+def _is_local(keyword: str, areas: List[str]) -> bool:
+    """'강서구 주간보호센터', '마곡동주간보호' — starts with a service-area name."""
+    flat = keyword.replace(" ", "")
+    return any(a and flat.startswith(a.replace(" ", "")) for a in areas)
 
 
 def _cached_int(keyword: str, metric: str, max_age_days: int) -> Optional[int]:
@@ -181,6 +194,8 @@ def propose(
 
     groups: Dict[str, List[dict]] = {key: [] for key in INTENT_GROUPS}
     excluded: List[dict] = []
+    kit = repo.get_brand_kit()
+    areas = list(kit.get("service_areas") or []) + list((kit.get("house_voice") or {}).get("service_areas") or [])
 
     for item in parsed.get("keywords", []):
         keyword = (item.get("keyword") or "").strip()
@@ -202,7 +217,8 @@ def propose(
             if volume and volume <= MIN_VIABLE_VOLUME:
                 excluded.append({**row, "reason": f"검색량 없음({volume}회 이하)"})
                 continue
-            if ratio is not None and ratio > MAX_DOCS_PER_SEARCH:
+            ceiling = LOCAL_MAX_DOCS_PER_SEARCH if _is_local(keyword, areas) else MAX_DOCS_PER_SEARCH
+            if ratio is not None and ratio > ceiling:
                 excluded.append({**row, "reason": f"경쟁 과다(문서/검색 {ratio:.0f})"})
                 continue
 
@@ -307,10 +323,14 @@ SEED_SYSTEM_PROMPT = (
     "'정부인증 가사서비스'가 아니라 그냥 **'가사서비스'** 라고 쓰세요.\n"
     "- **브랜드명·자체 용어·업계 전문용어를 쓰지 마세요.** 같은 이유로 결과가 비어버립니다.\n"
     "- 누구나 아는 **순수한 카테고리 이름 한 단어**를 쓰세요. 2~5글자가 적당합니다.\n"
-    "- 브랜드가 다루는 서로 다른 카테고리를 5개 고르세요. "
-    "한 카테고리에 몰면 그 축의 연관어만 나옵니다.\n\n"
-    "좋은 예시의 형태: '가사도우미', '청소', '정리수납', '방문요양', '주간보호'\n"
-    "나쁜 예시의 형태: '정부인증 가사서비스', '우렁각시 홈서비스', '서울형 가사서비스 바우처'\n\n"
+    "- 브랜드의 [업종]과 [핵심 사실]에 나오는 **사업 분야를 빠짐없이** 덮도록, 분야마다 최소 1개씩 "
+    "고르세요. 한 분야에 몰면 그 축의 연관어만 나옵니다.\n"
+    "- 같은 서비스를 고객이 **다른 이름으로** 더 많이 검색할 수 있습니다(공식 명칭과 일상 명칭이 다른 경우). "
+    "자료의 공식 명칭만 고집하지 말고, 고객이 실제로 입력할 일상 명칭을 고르세요.\n"
+    "- '센터', '서비스', '돌봄'처럼 여러 업종에 두루 쓰이는 말 하나만으로는 쓰지 마세요. 검색 의도가 "
+    "다른 업종(예: 아이 돌봄)으로 흩어집니다.\n\n"
+    "형태 예시(다른 업종 — 이 단어들을 그대로 쓰지 말고 형태만 참고하세요): 꽃집이라면 '꽃배달', "
+    "'꽃다발', '화환', '플라워클래스' / 나쁜 형태: '프리미엄 꽃배달', '○○플라워 시그니처'\n\n"
     '반드시 아래 JSON만 출력하세요: {"seeds": ["...", "...", "...", "...", "..."]}'
 )
 

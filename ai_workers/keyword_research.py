@@ -269,6 +269,20 @@ def _searchad_credentials() -> tuple[str, str, str]:
     )
 
 
+# 검색광고 API 초당 호출 제한 대응 — _searchad_request 참고.
+SEARCHAD_MIN_INTERVAL = 0.6
+SEARCHAD_MAX_RETRIES = 3
+SEARCHAD_RETRY_BACKOFF = 2.0
+_searchad_last_call = [0.0]
+
+
+def _searchad_pace() -> None:
+    wait = SEARCHAD_MIN_INTERVAL - (time.monotonic() - _searchad_last_call[0])
+    if wait > 0:
+        time.sleep(wait)
+    _searchad_last_call[0] = time.monotonic()
+
+
 def _searchad_request(path: str, params: dict, client=None) -> dict:
     """Signed GET against 검색광고.
 
@@ -276,30 +290,41 @@ def _searchad_request(path: str, params: dict, client=None) -> dict:
     the path *without* its query string, which is the detail that silently
     produces 401s if the params are included.
 
-    No daily cap is applied here: this API is free, so throttling it would
-    only slow the app down without saving anything.
+    No daily cap is applied here: this API is free, so a quota would only
+    slow the app down without saving anything. It *is* rate-limited per
+    second, though: a 52-combination 동네 키워드 sweep sent 11 requests back
+    to back and the 6th came back 429 Too Many Requests, failing the whole
+    sweep. Requests are spaced by SEARCHAD_MIN_INTERVAL, and a 429 is retried
+    with backoff before giving up.
     """
     customer_id, api_key, secret_key = client or _searchad_credentials()
-    timestamp = str(round(time.time() * 1000))
-    signature = base64.b64encode(
-        hmac.new(secret_key.encode(), f"{timestamp}.GET.{path}".encode(), hashlib.sha256).digest()
-    ).decode()
 
-    try:
-        resp = requests.get(
-            SEARCHAD_URL + path,
-            params=params,
-            headers={
-                "X-Timestamp": timestamp,
-                "X-API-KEY": api_key,
-                "X-Customer": customer_id,
-                "X-Signature": signature,
-            },
-            timeout=_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        raise NaverApiError(f"네트워크 오류: {exc}") from exc
+    for attempt in range(SEARCHAD_MAX_RETRIES + 1):
+        _searchad_pace()
+        timestamp = str(round(time.time() * 1000))
+        signature = base64.b64encode(
+            hmac.new(secret_key.encode(), f"{timestamp}.GET.{path}".encode(), hashlib.sha256).digest()
+        ).decode()
+        try:
+            resp = requests.get(
+                SEARCHAD_URL + path,
+                params=params,
+                headers={
+                    "X-Timestamp": timestamp,
+                    "X-API-KEY": api_key,
+                    "X-Customer": customer_id,
+                    "X-Signature": signature,
+                },
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise NaverApiError(f"네트워크 오류: {exc}") from exc
+        if resp.status_code != 429 or attempt == SEARCHAD_MAX_RETRIES:
+            break
+        time.sleep(SEARCHAD_RETRY_BACKOFF * (attempt + 1))
 
+    if resp.status_code == 429:
+        raise NaverApiError("검색광고 API 요청이 너무 잦습니다 — 1~2분 뒤 다시 시도하세요.")
     if resp.status_code == 401:
         raise NaverApiError("인증 실패 — CUSTOMER_ID / 액세스라이선스 / 비밀키를 확인하세요.")
     if not resp.ok:
@@ -476,8 +501,58 @@ def rank_keywords(
 # against 11 competing posts per search) while keeping terms three times more
 # crowded. It now sits high enough to exclude only true head terms, and the
 # document-per-search ratio does the real filtering.
-DEFAULT_MIN_VOLUME = 200
+# The floor was 200, set for a product brand whose blog already ranked. A
+# blog with little history (C-Rank near zero) cannot win the busy terms at
+# all, and what it *can* win is the long tail — a '화곡동 가사도우미' at 60
+# searches a month with a handful of competing posts. 50 keeps that tail in
+# the candidate list while staying well above the masked '< 10' band
+# (see _parse_count and keyword_curator.MIN_VIABLE_VOLUME).
+DEFAULT_MIN_VOLUME = 50
 DEFAULT_MAX_VOLUME = 30_000
+
+# --- local (neighbourhood) keywords -----------------------------------------
+# 동네 이름 + 서비스어 조합. 연관키워드 발굴(discover_keywords)은 검색량 큰 순으로
+# 돌려주므로 동네 단위 검색어는 거의 올라오지 않습니다 — 그래서 조합을 직접 만들어
+# 검색량만 무료로 잽니다(검색광고 API). 경쟁도(유료)는 담당자가 고른 것만 잽니다.
+DEFAULT_LOCAL_SERVICE_TERMS = ["가사도우미", "청소도우미", "가사서비스", "정리수납", "주간보호센터", "데이케어센터", "방문요양"]
+LOCAL_MIN_VOLUME = 20
+
+
+def local_candidates(areas: List[str], services: List[str]) -> List[str]:
+    """'화곡동 가사도우미' style combinations, area-major, deduplicated."""
+    out = []
+    for area in areas:
+        for service in services:
+            area, service = (area or "").strip(), (service or "").strip()
+            if area and service:
+                out.append(f"{area} {service}")
+    return list(dict.fromkeys(out))
+
+
+def measure_local(
+    areas: List[str], services: List[str], *, min_volume: int = LOCAL_MIN_VOLUME
+) -> List[dict]:
+    """Monthly volume for every area × service combination. Free (검색광고 only).
+
+    Returns rows at or above `min_volume`, busiest first, each marked with the
+    blog document count if one is already cached (no metered call here).
+    """
+    combos = local_candidates(areas, services)
+    if not combos:
+        return []
+    volumes = keyword_volumes(combos)
+    rows = []
+    for kw in combos:
+        volume = volumes.get(kw) or 0
+        if volume < min_volume:
+            continue
+        documents = repo.get_cached_metric(kw, "blog_total", DOCUMENT_CACHE_DAYS)
+        rows.append({
+            "keyword": kw,
+            "estimated_volume": volume,
+            "documents": int(documents) if documents is not None else None,
+        })
+    return sorted(rows, key=lambda r: r["estimated_volume"], reverse=True)
 
 
 def pool_freshness(keywords: List[str]) -> dict:
@@ -560,7 +635,8 @@ def refresh_pool(keywords: List[str], *, force: bool = False) -> dict:
 
 
 def sweep_candidates(
-    seeds: List[str], *, min_volume: int = DEFAULT_MIN_VOLUME, max_volume: int = DEFAULT_MAX_VOLUME
+    seeds: List[str], *, min_volume: int = DEFAULT_MIN_VOLUME, max_volume: int = DEFAULT_MAX_VOLUME,
+    local_areas: Optional[List[str]] = None,
 ) -> List[dict]:
     """Free half of the sweep: everything in the winnable volume band.
 
@@ -568,8 +644,19 @@ def sweep_candidates(
     hundreds of rows; scoring costs one metered request per row. Handing the
     candidate list back first lets the caller see the bill before agreeing
     to it.
+
+    `local_areas` moves candidates that start with a service-area name to
+    the front. Scoring takes the first N, and discovery is ordered by volume,
+    so for a neighbourhood business the national head terms (요양보호사시험
+    27,860, 요양원 21,520, 욕창 16,430 …) filled every paid slot and the
+    keywords the business can actually win — 강서구 주간보호센터 190,
+    양천구 방문요양 400 — ranked below 600th and were never measured.
     """
-    return [r for r in discover_keywords(seeds) if min_volume <= r["volume"] <= max_volume]
+    rows = [r for r in discover_keywords(seeds) if min_volume <= r["volume"] <= max_volume]
+    if local_areas:
+        prefixes = [a.replace(" ", "") for a in local_areas if a]
+        rows.sort(key=lambda r: not any(r["keyword"].replace(" ", "").startswith(p) for p in prefixes))
+    return rows
 
 
 def score_candidates(candidates: List[dict], *, limit: int = 40, use_cache: bool = True) -> List[dict]:

@@ -42,8 +42,8 @@ from ai_workers.multi_llm_router import generate_text
 AUDIT_SYSTEM_PROMPT = (
     "당신은 대한민국 「표시·광고의 공정화에 관한 법률」, 「가사근로자의 고용개선 등에 관한 법률」, "
     "「노인장기요양보험법」·「의료법」의 광고 관련 규정을 기준으로 마케팅 문안을 검토하는 법무 검토관입니다. "
-    "정부인증 가사서비스 제공기관이자 방문요양·주간보호도 운영하는 사회적협동조합(사회적기업)의 "
-    "글을 검토합니다.\n\n"
+    "어르신 주간보호·방문요양 기관(강서나눔통합돌봄센터)을 운영하고 정부인증 가사서비스도 제공하는 "
+    "사회적협동조합(사회적기업)의 글을 검토합니다.\n\n"
     "다음을 중점적으로 찾아내세요:\n"
     "1) 서비스 결과를 보장하는 절대적 표현 — '100% 만족', '완벽한 청소', '무조건', "
     "'얼룩 하나 없이', '책임지고 해결' 등 입증할 수 없는 결과 약속.\n"
@@ -56,15 +56,23 @@ AUDIT_SYSTEM_PROMPT = (
     "'정부가 품질을 보증합니다'처럼 인증을 결과 보증으로 확대하면 위반입니다.\n"
     "4) 요금·지원제도의 오표시 — [검증된 사실]과 다른 금액, 서울형 가사서비스 바우처를 "
     "'무료'로 쓰거나 대상 조건(서울 거주 중위소득 180% 이하 임산부·맞벌이·다자녀 가정)과 "
-    "한도(70만 원)를 빼서 누구나 받을 수 있는 것처럼 쓰는 것.\n"
+    "한도(70만 원)를 빼서 누구나 받을 수 있는 것처럼 쓰는 것. [검증된 사실]에 추가요금(복층·공휴일 등)이 "
+    "있는데 '추가 비용 없이', '추가 요금 없이'처럼 쓰는 것, 자료에 없는 기간·횟수 수식어('연간', '매월', "
+    "'무제한')를 금액에 붙이는 것.\n"
     "5) 최상급·배타적 표현 — '국내 최초', '업계 최고', '유일한', '가장 저렴한'.\n"
     "6) 방문요양·주간보호 관련 — 본인부담금 면제·할인으로 이용을 유인하는 표현, "
-    "'치매 예방·치료', '재활로 회복' 등 질병 예방·치료 효과를 단정하는 표현.\n"
+    "'치매 예방·치료', '재활로 회복' 등 질병 예방·치료 효과를 단정하는 표현, 프로그램이 근력·인지 "
+    "기능을 '지켜 드린다·좋아진다·회복된다'고 장담하는 표현, 센터가 장기요양등급을 '받게 해 준다'는 "
+    "약속, [검증된 사실]에 없는 등급 범위·비용·정원·집 앞 송영 같은 이용 조건.\n"
     "7) 개인정보 노출 — 고객 실명, 아파트 동·호수 같은 상세 주소, 특정인을 알아볼 수 있는 "
     "후기 정보.\n"
     "8) **[검증된 사실]과 어긋나는 수치** — 요금, 시간, 인원, 연도, 보험 한도. "
     "[검증된 사실]에 없거나 그와 다른 숫자가 나오면 반드시 지적하고, replacement에서는 "
-    "[검증된 사실]에 맞게 고치거나 숫자를 빼세요. 절대 새 숫자를 지어내지 마세요.\n\n"
+    "[검증된 사실]에 맞게 고치거나 숫자를 빼세요. 절대 새 숫자를 지어내지 마세요.\n"
+    "9) **[검증된 사실]에 없는 서비스 절차·시설·식사·건강관리를 사실처럼 쓰는 것** — 예: 도착하면 "
+    "체온·건강 상태를 확인한다, 치아가 약한 분을 위해 따로 조리한다, 차를 대접한다, 집 앞까지 모신다. "
+    "독자가 '센터가 이렇게 해 준다'고 믿게 되는 구체적 약속이면 지적하고, replacement에서는 그 부분을 "
+    "빼거나 [검증된 사실] 수준으로 일반화하세요. 감정·분위기 묘사('편안한 하루')는 해당하지 않습니다.\n\n"
     "청소·세탁 항목, 요금, 교육·신원 확인·배상보험 같은 [검증된 사실]을 그대로 설명하는 것과, "
     "독자의 일상에 공감하는 서술 자체는 문제가 아닙니다. 과장하지 않은 표현까지 억지로 고치지 마세요.\n\n"
     "텍스트 중간에 `[IMAGE: 경로]` 형식의 태그나 `<<<`로 시작하는 구분자가 있다면 "
@@ -102,10 +110,20 @@ AUDIT_SYSTEM_PROMPT = (
 # Brand-agnostic by construction: the specific product names come from the
 # Brand Kit glossary, so nothing here is 더스티치-specific.
 _CERT_RE = re.compile(r"[가-힣A-Za-z]*인증")
+# 서비스 기관의 집합 주어 — '관리사님들은 … 인증을 받은', '저희 선생님들은 …'. 기관 인증을
+# 일하는 사람 전체에게 넓히는 것이 서비스업에서 가장 흔한 인증 과장입니다.
 _COLLECTIVE_RE = re.compile(
-    r"모든|모두|전\s?제품|전\s?품목|전\s?라인|제품들|소품들|상품들|굿즈들|아이템들|라인업"
+    r"모든|모두|전원|전\s?제품|전\s?품목|전\s?라인|제품들|소품들|상품들|굿즈들|아이템들|라인업"
+    r"|[가-힣]*사님들|[가-힣]*사들|선생님들|직원들|종사자들|서비스들"
 )
 _SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
+# 용어집 단어가 이 수식어 바로 뒤에 오거나 복수 접미사가 붙으면, 그 단어는 범위를
+# 좁히는 이름이 아니라 집합 주어 자체입니다 ('모든 가사관리사가', '가사관리사들은').
+_QUANTIFIER_BEFORE_RE = r"(?:모든|모두|전체|전원|전)\s*$"
+_PLURAL_AFTER_RE = r"^\s*(?:님)?들"
+# '정부인증 가사서비스 제공기관', '인증 사회적기업' — 인증이 기관 명사에 붙어 있으면 주어가
+# 누구든 그 문장은 기관을 말하는 것입니다 ('관리사님들은 정부인증 기관에서 교육을 받은').
+_INSTITUTION_AFTER_RE = re.compile(r"^\s*(?:[가-힣]+\s+)?(?:제공\s*)?(?:기관|업체|사회적기업)")
 
 CERT_SCOPE_NOTE = (
     "기관이 받은 인증이 모든 서비스나 관리사 개개인에게 붙은 것처럼 읽힙니다. "
@@ -151,14 +169,36 @@ def check_certification_scope(text: str, brand_kit: dict) -> List[dict]:
         collective = _COLLECTIVE_RE.search(sentence)
         if not cert or not collective or collective.start() > cert.start():
             continue
+        if _INSTITUTION_AFTER_RE.match(sentence[cert.end():]):
+            continue
         # A glossary term inside the certification word itself ('새활용' in
         # '새활용제품인증') is not the sentence naming a product.
         outside_cert = sentence[: cert.start()] + sentence[cert.end():]
-        if any(name in outside_cert for name in product_names):
+        if any(_names_scope(name, outside_cert) for name in product_names):
             # "행복인형과 스크런치 등 인증 제품들은 …" carries its own scope.
             continue
         findings.append({"phrase": sentence, "note": CERT_SCOPE_NOTE})
     return findings
+
+
+def _names_scope(name: str, text: str) -> bool:
+    """Does `name` appear in `text` as something that narrows the claim?
+
+    For a product brand the glossary holds item names, and naming one scopes
+    the certification ('행복인형 등 인증 제품들'). For a service provider the
+    glossary holds the category itself — 가사관리사, 가사서비스 — and those
+    words are the over-claim, not the scope: '모든 가사관리사가 정부인증을
+    받았습니다' names a glossary term and still stretches an institutional
+    certification over every worker. Treating every glossary hit as a scope
+    let exactly that sentence through. An occurrence counts only when it is
+    not itself quantified ('모든 X', 'X들').
+    """
+    for match in re.finditer(re.escape(name), text):
+        before, after = text[: match.start()], text[match.end():]
+        if re.search(_QUANTIFIER_BEFORE_RE, before) or re.match(_PLURAL_AFTER_RE, after):
+            continue
+        return True
+    return False
 
 
 def remove_certification_overclaims(text: str, brand_kit: dict) -> Tuple[str, List[str]]:
@@ -236,9 +276,11 @@ def certification_block(brand_kit: dict) -> List[str]:
     if not facts:
         return []
     return [
-        "[인증 사실 — 인증은 아래에 적힌 대상에만 해당합니다. 이 글의 제품이 목록에 없으면 인증을 "
-        "언급하지 마세요. '제품들', '대표 제품', '모든 제품'처럼 범위를 넓혀 쓰지 말고, 인증 관련 "
-        "해시태그도 달지 마세요]\n" + "\n".join(f"- {f}" for f in facts)
+        "[인증 사실 — 인증은 아래에 적힌 대상(기관 또는 품목)에만 해당합니다. 이 글의 대상이 "
+        "목록에 없으면 인증을 언급하지 마세요. 기관 인증이면 주어를 기관으로 쓰고, '모든 제품', "
+        "'대표 제품', '관리사님들은 모두 인증을 받은'처럼 품목 전체나 일하는 사람 개개인에게 "
+        "넓혀 쓰지 마세요. 본문에서 인증을 말하지 않았다면 인증 관련 해시태그도 달지 "
+        "마세요]\n" + "\n".join(f"- {f}" for f in facts)
     ]
 
 
@@ -363,6 +405,21 @@ _VIOLATION_HINTS = (
 )
 
 
+# 빠진 정보를 '더 넣으라'는 조언. 프롬프트가 "빠뜨린 정보를 추가하라는 요구는 언제나
+# suggestions"라고 정해 두었는데, 실측에서 "제외 서비스를 간단히 덧붙이면 이용 전 오해를
+# 더욱 줄일 수 있습니다"가 '오해' 한 단어 때문에 위반으로 격상돼 X·당근 채널이 '미해결'로
+# 떴습니다. 글에 *없는* 것을 권하는 말은 그 글의 위반일 수 없으므로, 이 말이 있으면 위반
+# 어휘가 있어도 제안으로 둡니다.
+_ADDITIVE_HINTS = (
+    "덧붙이", "추가하면", "추가로 안내", "더하면", "넣으면", "함께 안내", "함께 적", "명시하면",
+    "언급하면", "소개하면", "줄일 수", "알려 주면", "알려주면",
+)
+
+
+def _is_additive_advice(text: str) -> bool:
+    return any(hint in text for hint in _ADDITIVE_HINTS)
+
+
 def _has_violation_vocabulary(text: str) -> bool:
     return any(hint in text.lower() for hint in _VIOLATION_HINTS)
 
@@ -399,7 +456,7 @@ def _looks_like_suggestion(text: str, has_phrase: bool = True) -> bool:
     """
     lowered = text.lower()
     if not has_phrase:
-        return any(hint in lowered for hint in _SUGGESTION_HINTS)
+        return _is_additive_advice(text) or any(hint in lowered for hint in _SUGGESTION_HINTS)
     if _has_violation_vocabulary(text):
         return False
     return any(hint in lowered for hint in _SUGGESTION_HINTS)
@@ -535,7 +592,8 @@ def run_llm_audit(
             suggestion = str(item).strip()
             if not suggestion:
                 continue
-            (promoted if _has_violation_vocabulary(suggestion) else declared).append(suggestion)
+            promote = _has_violation_vocabulary(suggestion) and not _is_additive_advice(suggestion)
+            (promoted if promote else declared).append(suggestion)
         grounded += promoted
 
         # Only edits for findings that survived classification are applied —

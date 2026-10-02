@@ -18,8 +18,14 @@ import time
 
 import flet as ft
 
-from ai_workers import content_mode, factsheet, vision
-from ai_workers.content_writer import LENGTH_MODES, regenerate_sns, revise_content, run_pipeline
+from ai_workers import content_mode, factsheet, post_types, vision
+from ai_workers.content_writer import (
+    LENGTH_MODES,
+    enabled_channels,
+    regenerate_sns,
+    revise_content,
+    run_pipeline,
+)
 from ai_workers.sns_validator import TWEET_HARD_MAX, x_weighted_length
 from core import repo, storage
 
@@ -90,11 +96,15 @@ def _build_sim_panel(campaign_id: str, scale: float, sim_state: dict, refresh_si
         return ft.Text("작업할 콘텐츠를 선택하세요.", size=fs(12, scale), color=BRAND_COLORS["text_muted"])
 
     brand_kit = repo.get_brand_kit()
+    # 꺼진 채널은 미리보기에서도 뺍니다. 네이버 블로그는 항상 있습니다.
+    active = set(enabled_channels(brand_kit)) | {"naver"}
+    if sim_state["channel"] not in active:
+        sim_state["channel"] = "naver"
 
     channel_group = ft.RadioGroup(
         value=sim_state["channel"],
         content=ft.Row(
-            [ft.Radio(value=k, label=f"{v['icon']} {v['label']}") for k, v in sim.CHANNELS.items()],
+            [ft.Radio(value=k, label=f"{v['icon']} {v['label']}") for k, v in sim.CHANNELS.items() if k in active],
             wrap=True,
         ),
     )
@@ -272,14 +282,56 @@ def _build_campaign_editor(page: ft.Page, campaign_id: str, scale: float, reload
 
     title_field = ft.TextField(
         label="제목", value=campaign.get("title") or "",
-        hint_text="비워두면 AI가 25자 이내로 지어줍니다", expand=True,
+        hint_text="비워두면 AI가 20~30자로 지어줍니다 (검색 키워드를 앞쪽에)", expand=True,
     )
     memo_field = ft.TextField(
         label="담당자 메모 (초안의 씨앗)", value=campaign.get("memo") or "",
         multiline=True, min_lines=5, max_lines=10, expand=True,
         hint_text="예: 화곡동 맞벌이 가정 정기 3시간 첫 방문. 주방·욕실 위주로 요청. 해피콜에서 빨래 개어 둔 게 제일 좋았다고 하심.",
     )
-    controls += [title_field, memo_field]
+    # --- 글 유형 ---------------------------------------------------------------
+    # 고르면 모드·서비스 정보·메모 틀이 함께 채워집니다(이미 입력한 칸은 건드리지 않음).
+    # 생성 로직은 이 값이 아니라 채워진 입력을 보므로, 고른 뒤에 무엇이든 고쳐도 됩니다.
+    saved_type = campaign.get("post_type")
+    type_dropdown = ft.Dropdown(
+        label="📝 글 유형 (고르면 아래 입력이 알맞게 채워집니다)",
+        value=saved_type if post_types.get(saved_type) else None,
+        options=[ft.DropdownOption(key=k, text=post_types.POST_TYPES[k]["label"]) for k in post_types.ORDER],
+        expand=True,
+    )
+    type_hint = ft.Text(
+        (post_types.get(saved_type) or {}).get("hint", ""),
+        size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+    )
+
+    def on_type_select(e: ft.Event) -> None:
+        spec = post_types.get(type_dropdown.value)
+        if not spec:
+            return
+        if spec["mode"]:
+            mode_group.value = spec["mode"]
+        else:
+            mode_group.value = content_mode.resolve(None, brand_kit)["key"]
+        mode_caption.value = content_mode.describe(mode_group.value)
+        product_map = sheet_fields["product_fields"]
+        filled = post_types.default_product_fields(
+            type_dropdown.value, brand_kit, {k: tf.value for k, tf in product_map.items()}
+        )
+        for key, tf in product_map.items():
+            tf.value = filled.get(key, tf.value)
+        repo.update_campaign(
+            campaign_id, content_mode=mode_group.value,
+            product_fields=factsheet.clean(factsheet.PRODUCT, {k: tf.value for k, tf in product_map.items()}),
+        )
+        if not (memo_field.value or "").strip() and spec["memo"]:
+            memo_field.value = spec["memo"]
+        type_hint.value = spec["hint"]
+        repo.update_campaign(campaign_id, post_type=type_dropdown.value)
+        on_memo_change(None)
+        page.update()
+
+    type_dropdown.on_select = on_type_select
+    controls += [title_field, ft.Row([type_dropdown]), type_hint, memo_field]
 
     # --- 공지/제품 팩트시트 ---------------------------------------------------
     sheet_fields: dict[str, dict[str, ft.TextField]] = {}
@@ -299,9 +351,21 @@ def _build_campaign_editor(page: ft.Page, campaign_id: str, scale: float, reload
         sheet_fields[column] = field_map
 
         label = sheet.title + (f" ({filled_n}개 입력됨)" if filled_n else "")
+        extra: list[ft.Control] = []
+        if sheet is factsheet.PRODUCT and brand_kit.get("product_defaults"):
+            def on_fill_defaults(e: ft.Event, field_map=field_map) -> None:
+                filled = post_types.all_product_defaults(brand_kit, {k: tf.value for k, tf in field_map.items()})
+                for key, tf in field_map.items():
+                    tf.value = filled.get(key, tf.value)
+                page.update()
+
+            extra.append(ft.OutlinedButton(
+                "📥 브랜드 킷 기본값 채우기 (빈 칸만)", on_click=on_fill_defaults,
+                tooltip="요금·서비스 범위·신청 방법 등 🧵 브랜드 킷에 저장된 기본값으로 빈 칸을 채웁니다.",
+            ))
         body = ft.Column(
             [ft.Text(sheet.hint + " 채운 항목은 본문에 반드시 들어가고, 비워둔 항목은 AI가 지어내지 않습니다.",
-                     size=fs(11, scale), color=BRAND_COLORS["text_muted"])] + rows,
+                     size=fs(11, scale), color=BRAND_COLORS["text_muted"])] + extra + rows,
             spacing=8,
         )
         controls += collapsible(label, body, initially_open=bool(filled_n))
@@ -467,7 +531,7 @@ def _build_campaign_editor(page: ft.Page, campaign_id: str, scale: float, reload
         size=fs(11, scale), color=BRAND_COLORS["text_muted"], visible=not can_generate,
     )
 
-    def on_memo_change(e: ft.Event) -> None:
+    def on_memo_change(e: ft.Event | None) -> None:
         # generate_button은 이 화면을 처음 열 때의 memo_field 값으로 딱 한 번만
         # disabled가 정해진다 — on_change 없이는 메모를 입력해도 버튼이 계속
         # 비활성 상태로 굳어 있어 클릭할 수 없는 것처럼 보인다.
@@ -626,14 +690,14 @@ def _build_campaign_editor(page: ft.Page, campaign_id: str, scale: float, reload
         if (campaign.get("guardrail_report") or {}).get("sns_stale"):
             sns_status = ft.Text("", size=fs(12, scale))
             sns_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
-            sns_button = ft.FilledButton("📣 SNS 3채널 다시 만들기 (현재 본문 기준)", disabled=is_processing)
+            sns_button = ft.FilledButton("📣 SNS 채널 다시 만들기 (현재 본문 기준)", disabled=is_processing)
 
             def on_regen_sns(e: ft.Event) -> None:
                 sns_button.disabled = True
                 sns_button.update()
                 sns_spinner.visible = True
                 sns_spinner.update()
-                sns_status.value = "⏳ 인스타·X·쇼츠·발행 태그를 다시 만드는 중…"
+                sns_status.value = "⏳ SNS 채널과 발행 태그를 다시 만드는 중…"
                 sns_status.color = BRAND_COLORS["text_muted"]
                 sns_status.update()
 
@@ -662,7 +726,7 @@ def _build_campaign_editor(page: ft.Page, campaign_id: str, scale: float, reload
             sns_button.on_click = on_regen_sns
             controls += [
                 _status_box(
-                    "📣 인스타·X·쇼츠가 수정 전 본문 기준입니다 — 본문에서 바꾼 날짜·가격·내용이 SNS에는 "
+                    "📣 SNS 채널(인스타·X·쇼츠·당근)이 수정 전 본문 기준입니다 — 본문에서 바꾼 날짜·가격·내용이 SNS에는 "
                     "반영돼 있지 않습니다. 게시 전에 다시 만드세요.",
                     scale, "warning",
                 ),
@@ -905,21 +969,62 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
     else:
         shorts_tab = ft.Text("쇼츠 구성안이 아직 없습니다.", size=fs(12, scale), color=BRAND_COLORS["text_muted"])
 
+    # --- 당근 소식 --------------------------------------------------------
+    post = campaign.get("daangn_post") or {}
+    dg_title_field = ft.TextField(label="소식 제목 (30자 이내 권장)", value=post.get("title") or "", expand=True)
+    dg_body_field = ft.TextField(
+        label="소식 본문 (해시태그 없이, 동네 이웃에게 알리듯)",
+        value=post.get("body") or "", multiline=True, min_lines=8, max_lines=14, expand=True,
+    )
+    dg_status = ft.Text("", size=fs(12, scale), color="#1B6E3C")
+
+    def on_save_dg(e: ft.Event) -> None:
+        repo.update_campaign(
+            campaign_id, daangn_post={"title": dg_title_field.value.strip(), "body": dg_body_field.value.strip()},
+        )
+        dg_status.value = "저장했습니다."
+        dg_status.update()
+        refresh_sim()
+
+    daangn_tab = ft.Column(
+        [
+            dg_title_field,
+            dg_body_field,
+            ft.Text(
+                f"제목 {len(dg_title_field.value)}자 · 본문 {len(dg_body_field.value)}자 — 당근 비즈프로필 → 소식 쓰기에 "
+                "붙여 넣고, 사진은 이 글의 사진 중 1~3장을 고르세요.",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+            ),
+            ft.Row([ft.FilledButton("소식 저장", on_click=on_save_dg), dg_status]),
+            *collapsible("📋 복사해서 당근 비즈프로필에 붙여넣기", ft.Column([
+                _copy_field("제목", dg_title_field.value, page, scale),
+                _copy_field("본문", dg_body_field.value, page, scale),
+            ], spacing=8)),
+        ],
+        spacing=8, scroll=ft.ScrollMode.AUTO,
+    )
+
+    # 꺼진 채널은 탭에서도 뺍니다 (🧵 브랜드 킷 → 함께 만들 채널).
+    active = set(enabled_channels(repo.get_brand_kit()))
+    tabs = [("네이버 본문", naver_tab)]
+    for key, label, tab in (
+        ("instagram", "인스타 캡션", ig_tab),
+        ("x", "X 스레드", x_tab),
+        ("shorts", "쇼츠 자막", shorts_tab),
+        ("daangn", "당근 소식", daangn_tab),
+    ):
+        if key in active:
+            tabs.append((label, tab))
+
     return ft.Tabs(
-        length=4,
+        length=len(tabs),
         height=560,
         content=ft.Column(
             expand=True,
             controls=[
-                ft.TabBar(tabs=[
-                    ft.Tab(label="네이버 본문"), ft.Tab(label="인스타 캡션"),
-                    ft.Tab(label="X 스레드"), ft.Tab(label="쇼츠 자막"),
-                ]),
+                ft.TabBar(tabs=[ft.Tab(label=label) for label, _ in tabs]),
                 ft.TabBarView(expand=True, controls=[
-                    ft.Container(content=naver_tab, padding=10),
-                    ft.Container(content=ig_tab, padding=10),
-                    ft.Container(content=x_tab, padding=10),
-                    ft.Container(content=shorts_tab, padding=10),
+                    ft.Container(content=tab, padding=10) for _, tab in tabs
                 ]),
             ],
         ),
@@ -930,6 +1035,17 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
     report = campaign.get("guardrail_report")
     controls: list[ft.Control] = []
 
+    # 고객 집에서 찍은 사진은 이 채널의 가장 좋은 재료이자 가장 큰 개인정보 위험입니다.
+    # 글은 가드레일이 보지만 사진의 픽셀은 사진 분석 단계에서만 걸러낼 수 있습니다.
+    privacy = (report or {}).get("photo_privacy") or {}
+    if privacy:
+        names = " / ".join(f"{path.split('/')[-1]}: {what}" for path, what in privacy.items())
+        controls.append(_status_box(
+            f"🔒 개인정보가 보이는 사진 {len(privacy)}장 — {names}. 게시 전에 해당 부분을 모자이크하거나 "
+            "다른 사진으로 바꾸세요. (이름·주소·동호수·얼굴은 블로그·SNS에 그대로 올리면 안 됩니다)",
+            scale, "error",
+        ))
+
     for key, sheet in (("notice", factsheet.NOTICE), ("product", factsheet.PRODUCT)):
         section = (report or {}).get(key) or {}
         if section.get("checked") and section.get("missing_labels"):
@@ -939,7 +1055,7 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
                 scale, "warning",
             ))
 
-    sns_labels = {"instagram": "📸 인스타그램 캡션", "x": "🐦 X 스레드", "shorts": "🎬 쇼츠 자막"}
+    sns_labels = {"instagram": "📸 인스타그램 캡션", "x": "🐦 X 스레드", "shorts": "🎬 쇼츠 자막", "daangn": "🥕 당근 소식"}
     for ch_key, ch_label in sns_labels.items():
         compliance = ((report or {}).get("sns_compliance") or {}).get(ch_key) or {}
         if compliance.get("checked") and compliance.get("compliance_pass") is False:
@@ -1036,14 +1152,14 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
     sns = report.get("sns_checks")
     if sns:
         all_issues = []
-        for key in ("x", "instagram", "shorts", "naver_tags"):
+        for key in ("x", "instagram", "shorts", "daangn", "naver_tags"):
             all_issues += sns.get(key) or []
         if all_issues:
             for issue in all_issues:
                 icon = {"fixed": "🔧", "warn": "⚠️", "blocked": "⛔"}.get(issue["level"], "•")
                 body.append(ft.Text(f"{icon} SNS 형식: {issue['message']}", size=fs(11, scale)))
         else:
-            body.append(ft.Text("✅ SNS 형식(트윗 길이·해시태그·훅·쇼츠 자막·발행 태그): 문제 없음", size=fs(11, scale)))
+            body.append(ft.Text("✅ SNS 형식(트윗 길이·해시태그·훅·쇼츠 자막·당근 소식·발행 태그): 문제 없음", size=fs(11, scale)))
 
     sns_pf = report.get("sns_proofread")
     if sns_pf:
@@ -1051,7 +1167,7 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
         for fix in sns_pf:
             body.append(ft.Text(f"　• [{fix.get('kind', '교정')}] {fix['before']} → {fix['after']}", size=fs(10, scale)))
 
-    gap_labels = {"instagram": "인스타 캡션", "x": "X 스레드"}
+    gap_labels = {"instagram": "인스타 캡션", "x": "X 스레드", "daangn": "당근 소식"}
     for ch_key, missing in (report.get("sns_fact_gaps") or {}).items():
         body.append(ft.Text(
             f"📋 {gap_labels.get(ch_key, ch_key)}에 없는 입력값 — {', '.join(missing)} "
@@ -1134,8 +1250,8 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
             target = recommendation.get("length_target") or [0, 0]
             body.append(ft.Text(
                 f"🔸 본문이 {recommendation.get('length_chars') or 0:,}자로 목표({target[0]:,}~{target[1]:,}자)보다 "
-                "짧습니다. 제품을 잘 모르는 독자는 사진보다 설명을 읽습니다. 메모에 설명할 재료 — 무엇으로 "
-                "어떻게 만들었는지, 크기·구성, 어디에 쓰는지, 누구에게 맞는지, 손님 반응 — 를 더하거나 "
+                "짧습니다. 서비스를 잘 모르는 독자는 사진보다 설명을 읽습니다. 메모에 설명할 재료 — 어떤 "
+                "집에서 무엇을 요청했는지, 어떤 순서로 진행했는지, 누구에게 맞는지, 고객 반응 — 를 더하거나 "
                 "🧹 서비스·이용 정보를 채운 뒤 다시 생성하세요.",
                 size=fs(11, scale),
             ))
@@ -1144,8 +1260,8 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
             body.append(ft.Text(
                 f"📑 최근 글 「{recommendation['body_similar_to']}」과 본문이 "
                 f"{recommendation.get('body_similarity') or 0:.0%} 겹칩니다. 네이버는 같은 블로그의 비슷한 글을 "
-                "유사문서로 보고 노출을 낮출 수 있습니다. 메모에 이 제품만의 디테일(색감·손님 반응·"
-                "제작 뒷이야기 등)을 한 줄이라도 더한 뒤 다시 생성하세요 — 같은 메모로는 같은 글이 나옵니다.",
+                "유사문서로 보고 노출을 낮출 수 있습니다. 메모에 이 글만의 디테일(동네·가구 형태·요청한 일·"
+                "고객 반응 등)을 한 줄이라도 더한 뒤 다시 생성하세요 — 같은 메모로는 같은 글이 나옵니다.",
                 size=fs(11, scale),
             ))
 

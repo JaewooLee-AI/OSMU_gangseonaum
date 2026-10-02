@@ -50,6 +50,12 @@ Claude Code가 무엇을 어떻게 고치면 되는지 알려주는 작업지시
 | `BLACKLIST_MAP` | 아래 3단계와 함께 결정 |
 | `FEW_SHOT_SAMPLES` | 원하는 문체의 실제 예시 글 1~2편 (있다면). 모델은 이 글의 **말투와 문장 길이**를 따라 하므로, 문장이 길고 딱딱한 보도자료식 글을 넣으면 톤앤매너에 "짧게"라고 써도 장황해집니다 |
 | `SEED_FIXES` | 새 회사는 **빈 리스트 `[]`로** 두세요. 이전 버전이 이미 저장해 둔 브랜드 킷 문구를 한 번만 고치는 용도라, 새로 세팅하는 회사에는 해당 사항이 없습니다 |
+| `NON_TARGET_KEYWORDS` | SEO 키워드 중 본문에는 쓰되 글의 타깃·제목 키워드로는 쓰지 않을 말. 톤앤매너가 꼭 쓰라고 정한 호칭이나 브랜드 고유어처럼 **매 글에 많이 나오지만 검색하는 사람이 고객이 아닌 말**을 넣습니다 |
+| `SERVICE_AREAS` | 실제 서비스 지역(구·동·생활권). 📍 동네 키워드 후보와 인스타·당근 지역 표현의 재료입니다. 전국 배송 업종이면 빈 리스트로 두세요 |
+| `PRODUCT_DEFAULTS` | 🧹 서비스·이용 정보 시트의 기본값 (키: price/moq/lead_time/size/options/custom/order). **`CORE_FACTS`에 있는 내용만** 넣고 모르는 칸은 빼세요 — 이 값은 글에 '반드시 넣을 사실'로 전달됩니다 |
+| `NEWS_EXCLUDE_TERMS` | 뉴스 큐레이션에서 뺄 기사 단어 (업종 키워드로 검색하면 섞여 들어오는 논쟁적·무관한 주제) |
+| `CARE_FACTS`·`CARE_TERMINOLOGY`·`CARE_PERSONA`·`CARE_TONE_EXTRA`·`CARE_PRODUCT_DEFAULTS` | 두 번째 사업 분야(현재: 주간보호·방문요양) 값. 글 유형 'care'일 때만 화자·규칙·기본값이 바뀝니다. 새 회사에 두 번째 사업이 없으면 `CARE_FACTS`·`CARE_TERMINOLOGY`를 빈 값으로 두고 `ai_workers/post_types.py`의 'care' 유형을 빼세요 |
+| `TOPIC_CALENDAR` | 대시보드 📅 추천 주제. `month`(0=상시)·`post_type`(`ai_workers/post_types.py`의 키)·`title`·`memo`. 메모에는 다룰 주제만 쓰고 회사 사실은 지어내지 마세요. 제공하지 않는 서비스를 끌어들이는 주제는 넣지 않습니다 |
 
 다 채운 뒤 `seed_if_empty()` 함수 자체는 건드리지 마세요 — 이름 그대로 **비어 있을 때만** 실행되는
 함수라, 그대로 둬도 새 값으로 정상 동작합니다.
@@ -126,7 +132,9 @@ primary/primary_dark/secondary/accent/mint/bg/text/text_muted). Flet 테마(`fle
 | `flet_app/simulators/__init__.py`, `instagram.py` | 시뮬레이터의 `"더봄봄"`/`"thestitch_artplay"` 기본값. 브랜드 킷 값이 비어 있을 때만 쓰이는 fallback이라 우선순위는 낮습니다. |
 | `flet_app/views/workbench_view.py`, `brand_kit_view.py` 등 | 도움말·placeholder 예시 문구 (현재 가사서비스 예시로 교체됨). |
 | `ai_workers/factsheet.py` | 공지/제품 정보 입력 필드(일시·장소·최소주문수량 등)는 소규모 제작·리테일 업종에 맞춰져 있습니다. 업종이 크게 다르면(예: 요식업, SaaS) 필드 구성 자체를 조정할 수 있습니다. |
-| `ai_workers/keyword_curator.py`의 `TOPIC_LIMIT`(기본 2), `MAX_DOCS_PER_SEARCH`(기본 100) / `ai_workers/keyword_research.py`의 `DEFAULT_MAX_VOLUME`(기본 30,000) | 회사의 실제 사업 축 개수, 블로그 권위 수준에 따라 조정. |
+| `ai_workers/keyword_curator.py`의 `TOPIC_LIMIT`(기본 2), `MAX_DOCS_PER_SEARCH`(기본 100) / `ai_workers/keyword_research.py`의 `DEFAULT_MIN_VOLUME`(기본 50)·`DEFAULT_MAX_VOLUME`(기본 30,000)·`DEFAULT_LOCAL_SERVICE_TERMS` | 회사의 실제 사업 축 개수, 블로그 권위 수준에 따라 조정. 블로그 이력이 거의 없으면 최소 검색량을 낮춰 롱테일을 남기고, 지역 서비스업이면 동네 키워드용 서비스어를 업종에 맞게 바꾸세요. |
+| `ai_workers/post_types.py` | 워크벤치 '글 유형' 프리셋(서비스·요금 안내 / 지원 제도 / 후기 / 생활 팁 / 인력 모집 / 공지 / 자유). 라벨·메모 틀·기본 모드가 서비스업 기준이라, 제품 판매 업종이면 라벨과 메모 틀을 다듬으세요. |
+| `ai_workers/daangn_writer.py` | 당근 비즈프로필 '소식' 채널. 지역 고객이 없는 업종이면 브랜드 킷 → 📣 함께 만들 채널에서 끄면 됩니다 (코드 수정 불필요). |
 | `README.md` | 현재 강서나눔돌봄센터 기준 설명입니다. 새 회사로 바꿀 때는 새 회사 소개로 갱신하는 것을 권장하되, 온보딩 자체에는 영향 없습니다. |
 
 ---
