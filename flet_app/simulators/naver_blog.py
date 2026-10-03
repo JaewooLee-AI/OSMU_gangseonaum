@@ -28,11 +28,15 @@ def _avatar() -> ft.Container:
     )
 
 
-def _figure(rel_path: str) -> ft.Control:
+def _figure(rel_path: str, caption: str = "") -> ft.Control:
+    # 사진 설명(ai_workers/photo_captions.py)이 있으면 네이버 발행 화면처럼 사진 아래에 보여 준다.
     return ft.Column(
         [
             ft.Image(src=str(storage.abs_path(rel_path)), height=360, fit=ft.BoxFit.CONTAIN),
-            ft.Text("사진 설명을 입력하세요.", size=13, color="#AAAAAA", text_align=ft.TextAlign.CENTER),
+            ft.Text(
+                caption or "사진 설명을 입력하세요.", size=13,
+                color="#666666" if caption else "#AAAAAA", text_align=ft.TextAlign.CENTER,
+            ),
         ],
         spacing=6,
     )
@@ -43,6 +47,7 @@ def render(campaign: dict, is_mobile: bool = False, blog_name: str = "공식 블
     content = campaign.get("content") or ""
     attached = campaign.get("storage_file_paths") or []
     hashtags = campaign.get("naver_hashtags") or []
+    captions = campaign.get("photo_captions") or {}
 
     blocks = content_blocks(content)
     tagged = {value for kind, value in blocks if kind == "image"}
@@ -53,7 +58,7 @@ def render(campaign: dict, is_mobile: bool = False, blog_name: str = "공식 블
         if kind == "text":
             body_controls.append(ft.Text(value, size=15 if is_mobile else 16, color="#333333"))
         else:
-            body_controls.append(_figure(value))
+            body_controls.append(_figure(value, captions.get(value, "")))
 
     if not body_controls:
         body_controls.append(ft.Text("본문이 비어 있습니다.", color="#999999"))
@@ -68,7 +73,7 @@ def render(campaign: dict, is_mobile: bool = False, blog_name: str = "공식 블
             bgcolor="#FFFAF0", border=ft.Border.all(1, "#FBD38D"), border_radius=6, padding=10,
         ))
         for path in untagged:
-            body_controls.append(_figure(path))
+            body_controls.append(_figure(path, captions.get(path, "")))
 
     controls: list[ft.Control] = [
         ft.Text(title, size=24 if is_mobile else 32, weight=ft.FontWeight.BOLD, color="#222222"),

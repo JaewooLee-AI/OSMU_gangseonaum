@@ -749,11 +749,30 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
     naver_tags_field = ft.TextField(label="발행 태그", value=" ".join(campaign.get("naver_hashtags") or []), expand=True)
     naver_status = ft.Text("", size=fs(12, scale), color="#1B6E3C")
 
+    # 사진 설명 — 네이버 사진 아래 '사진 설명을 입력하세요' 칸에 들어간다
+    # (ai_workers/photo_captions.py). 여기서 고친 값은 다시 생성해도 유지된다.
+    from ai_workers.photo_captions import ordered_photos
+
+    saved_captions = campaign.get("photo_captions") or {}
+    caption_fields: dict[str, ft.TextField] = {}
+    caption_rows: list[ft.Control] = []
+    for i, rel in enumerate(ordered_photos(campaign.get("content") or "", campaign.get("storage_file_paths") or []), 1):
+        tf = ft.TextField(label=f"{i}번 사진 설명", value=saved_captions.get(rel, ""), expand=True, max_length=40)
+        caption_fields[rel] = tf
+        caption_rows.append(ft.Row([
+            ft.Container(
+                content=ft.Image(src=str(storage.abs_path(rel)), width=56, height=56, fit=ft.BoxFit.COVER),
+                width=56, height=56, border_radius=6, clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            ),
+            tf,
+        ]))
+
     def on_save_naver(e: ft.Event) -> None:
         body_changed = (body_field.value or "").strip() != (campaign.get("content") or "").strip()
         repo.update_campaign(
             campaign_id, title=title_field.value.strip() or None, content=body_field.value,
             naver_hashtags=[t for t in naver_tags_field.value.split() if t.strip()],
+            photo_captions={rel: (tf.value or "").strip() for rel, tf in caption_fields.items() if (tf.value or "").strip()},
         )
         if body_changed:
             repo.mark_sns_stale(campaign_id)
@@ -852,6 +871,18 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
             ft.Text(title_field.value or "(제목 없음)", size=fs(18, scale), weight=ft.FontWeight.BOLD),
             body_field,
             naver_tags_field,
+            *(collapsible(
+                f"📷 사진 설명 ({sum(1 for tf in caption_fields.values() if tf.value)}/{len(caption_fields)}장)",
+                ft.Column(
+                    [ft.Text(
+                        "네이버 사진 아래 설명 칸에 자동으로 들어갑니다. 이미지 안의 글씨와 달리 검색에 잡히는 "
+                        "글이라, 사진이 많은 글에 특히 도움이 됩니다. 사람 이름·얼굴·주소는 쓰지 마세요. "
+                        "고친 뒤 [본문 저장]을 누르세요.",
+                        size=fs(10, scale), color=BRAND_COLORS["text_muted"],
+                    )] + caption_rows,
+                    spacing=6,
+                ),
+            ) if caption_rows else []),
             ft.Row([ft.FilledButton("본문 저장", on_click=on_save_naver), naver_status]),
             *collapsible("📋 복사해서 네이버에 직접 붙여넣기", ft.Column([
                 _copy_field("제목", title_field.value, page, scale),

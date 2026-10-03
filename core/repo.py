@@ -25,6 +25,7 @@ _CAMPAIGN_JSON_COLS = {
     "naver_hashtags": [],
     "shorts_script": None,
     "daangn_post": None,
+    "photo_captions": {},
 }
 
 _BRAND_KIT_JSON_COLS = {

@@ -43,6 +43,7 @@ from ai_workers.instagram_caption_writer import write_instagram_caption
 from ai_workers.multi_llm_router import generate_text, get_configured_vendor
 from ai_workers.naver_hashtag_writer import write_naver_hashtags
 from ai_workers.news_scraper import scrape_article
+from ai_workers.photo_captions import write_captions
 from ai_workers.photo_placement import (
     caption_attachments,
     ensure_all_photos_tagged,
@@ -766,6 +767,19 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
         report["title_variety"] = title_variety
         report["photo_privacy"] = photo_privacy
 
+        # --- stage 6g: photo captions for Naver's 사진 설명 line ---
+        # Written from the finished body (so each caption names the photo in
+        # this post's terms) and the privacy-stripped vision captions. A
+        # caption the marketer already edited is kept on regeneration.
+        photo_captions = _safe(
+            progress, "사진 설명 작성 중…",
+            lambda: write_captions(
+                final_title, final_content, storage_file_paths, captions, brand_kit, vendor,
+                existing=campaign.get("photo_captions") or {},
+            ),
+            campaign.get("photo_captions") or {},
+        ) if storage_file_paths else {}
+
         # --- stage 7: secondary channels ---
         # Shared with regenerate_sns so the first run and a later "SNS만 다시
         # 만들기" produce the channels the same way (see _secondary_channels).
@@ -784,6 +798,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             content=final_content,
             guardrail_passed=report["compliance_pass"],
             guardrail_report=report,
+            photo_captions=photo_captions,
             **sns_fields,
         )
         # Outlives this campaign on purpose, so a future run still avoids this
@@ -941,6 +956,19 @@ def revise_content(
         )
         naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords))
 
+        # Captions the marketer already has (and may have edited) are kept;
+        # only photos without one get a new caption.
+        photo_captions = campaign.get("photo_captions") or {}
+        if storage_file_paths and any(p not in photo_captions for p in storage_file_paths):
+            photo_captions = _safe(
+                progress, "사진 설명 보충 중…",
+                lambda: write_captions(
+                    final_title, final_content, storage_file_paths,
+                    _captions_with_privacy(storage_file_paths)[0], brand_kit, vendor, existing=photo_captions,
+                ),
+                photo_captions,
+            )
+
         # The SNS channels aren't regenerated here (see docstring), and this
         # report replaces the old one — which used to drop the channels'
         # compliance/format results along with it. Carry them over, and say
@@ -965,6 +993,7 @@ def revise_content(
             guardrail_passed=report["compliance_pass"],
             guardrail_report=report,
             naver_hashtags=naver_hashtags,
+            photo_captions=photo_captions,
         )
         _report(progress, "완료")
         return repo.get_campaign(campaign_id)

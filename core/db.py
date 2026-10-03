@@ -158,6 +158,8 @@ create table if not exists campaigns (
     shorts_script       text,
     -- 당근 비즈프로필 소식 {"title", "body"} — ai_workers/daangn_writer.py.
     daangn_post         text,
+    -- {rel_path: 사진 설명} — 네이버 사진 아래 설명 칸 (ai_workers/photo_captions.py).
+    photo_captions      text not null default '{}',
     publish_error       text,
     -- 게시 완료로 바뀐 시각. updated_at은 편집 때마다 바뀌어 게시 주기 계산에 못 씁니다.
     published_at        text,
@@ -339,6 +341,7 @@ _ADDED_COLUMNS = {
         "daangn_post": "text",
         "published_at": "text",
         "post_type": "text",
+        "photo_captions": "text not null default '{}'",
     },
     "brand_kit": {
         "keyword_weights": "text not null default '{}'",

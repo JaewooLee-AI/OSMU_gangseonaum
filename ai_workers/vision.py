@@ -86,7 +86,7 @@ def strip_privacy_marker(caption: str) -> str:
 
 # Bump when CAPTION_PROMPT changes semantically — old cache entries then stop
 # being served instead of silently mixing two prompt generations.
-PROMPT_VERSION = "v2-privacy"
+PROMPT_VERSION = "v3-privacy-org"
 
 # `caption_max_tokens` is the ceiling for ONE caption. It has to cover the
 # length CAPTION_PROMPT actually asks for (40~70 Korean characters), and
@@ -145,7 +145,9 @@ CAPTION_PROMPT = (
     "쓰지 마세요. 사진 1장당 한 문장, 40자~70자로 짧게 씁니다.\n"
     "사람 이름·주소·아파트 동호수·전화번호·차량번호가 적힌 택배 송장·우편물·명패 등이 보이거나, "
     "얼굴을 알아볼 수 있는 사람이 찍혀 있으면 그 글자는 옮겨 적지 말고 문장 끝에 "
-    f"{PRIVACY_MARKER} 무엇이 보이는지] 를 붙이세요 (예: {PRIVACY_MARKER} 택배 송장]).\n"
+    f"{PRIVACY_MARKER} 무엇이 보이는지] 를 붙이세요 (예: {PRIVACY_MARKER} 택배 송장]). "
+    "기관·가게의 간판·안내문·전단·현수막에 인쇄된 기관 이름·주소·대표 전화번호는 공개 정보이므로 "
+    "표시하지 마세요.\n"
     '반드시 아래 JSON 형식으로만 응답하세요: {"captions": ["1번 사진 설명", "2번 사진 설명"]}'
 )
 

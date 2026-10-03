@@ -23,6 +23,13 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
+# 로그를 파일로 돌려 실행하면(> app.log) print가 블록 단위로 버퍼링되어, 네이버
+# 게시가 실패한 직후에도 그 원인 로그가 파일에 없었다. 줄 단위로 바로 쓴다.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:  # noqa: BLE001 — packaged exe may have no real stdout
+    pass
+
 import flet as ft
 
 # flet_app/ sits next to core/ and ai_workers/ at the project root, so make
