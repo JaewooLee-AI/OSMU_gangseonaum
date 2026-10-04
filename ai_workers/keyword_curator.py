@@ -20,12 +20,10 @@ settings screen renders it as a diff and the human applies it.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Dict, List, Optional
 
 from ai_workers import keyword_research
-from ai_workers.multi_llm_router import generate_text, get_configured_vendor
+from ai_workers.multi_llm_router import generate_text, get_configured_vendor, parse_json_object
 from core import repo
 
 # Ordered by how directly the traffic converts, which is also the order the
@@ -73,6 +71,15 @@ IDENTITY_LIMIT = 3
 # this brand have the most demand in" is a sum, not a judgment.
 TOPIC_LIMIT = 2
 
+# 동네 이름이 붙은 키워드는 위 주제 집중에서 뺍니다. 검색량 합계로 주제를 고르면 동네
+# 키워드는 본래 작아서 매번 집니다 — 2026-10-04 실측: 기본값 그대로 1~4단계를 돌리면 전국
+# 정보 검색어 '장기요양'(합계 약 6만)과 '가사서비스'(1.6만)가 주력 주제가 되고, SNS 강화
+# 대상인 강서구 주간보호센터(180)·강서구 방문요양(320)·강서구 데이케어센터(90)가 세 번 모두
+# '주제 분산'으로 빠졌습니다. 동네 키워드는 이 사업이 실제로 이길 수 있는 말이고
+# (LOCAL_MAX_DOCS_PER_SEARCH와 같은 이유), 한 동네·한 서비스의 글은 주제를 흐리지 않습니다.
+# 대신 동네 조합이 풀을 다 차지하지 않도록 검색량 순으로 이 개수까지만 남깁니다.
+LOCAL_LIMIT = 6
+
 SYSTEM_PROMPT = (
     "당신은 네이버 블로그 SEO 전략가입니다. 브랜드 정보와 키워드 후보 목록을 받아, "
     "각 키워드가 이 브랜드에게 쓸모 있는지 판정하고 검색 의도와 주제로 분류합니다.\n\n"
@@ -85,8 +92,12 @@ SYSTEM_PROMPT = (
     "- **검색 의도가 여러 갈래로 갈리는 광범위한 일반어는 제외하세요.** 예를 들어 어떤 분야의 "
     "이름 자체(업계 용어 한 단어)는 그 분야의 취업·뉴스·학습 정보를 찾는 사람이 대부분이라 "
     "브랜드 고객과 연결되지 않습니다.\n"
-    "- 지금 당장 제품을 사려는 검색이 아니어도, 그 사람이 언젠가 이 브랜드의 고객이나 "
-    "공급자가 될 수 있다면 'prospect'로 채택하세요.\n"
+    "- 지금 당장 제품을 사려는 검색이 아니어도, 그 사람이 언젠가 이 브랜드의 **고객**이 될 수 "
+    "있다면 'prospect'로 채택하세요.\n"
+    "- **그 업종에서 일하려는 사람의 검색은 제외하세요** — 구인·구직·채용·월급·급여·자격증·"
+    "교육원·학원·국비지원·시험 같은 말이 붙은 검색입니다. 검색량이 커도 그 사람은 브랜드의 "
+    "고객이 아닙니다. (브랜드가 그 교육·채용을 사업으로 하고 [핵심 사실]에 적혀 있을 때만 "
+    "'division'으로 채택하세요.)\n"
     "- 검색량이 적어도 브랜드가 무엇을 하는 회사인지 드러내는 말이면 'identity'로 남기세요.\n\n"
     "그룹(검색 의도):\n"
     "- purchase: 제품·서비스를 사려는 검색\n"
@@ -127,9 +138,7 @@ def _cached_int(keyword: str, metric: str, max_age_days: int) -> Optional[int]:
 
 
 def _parse(raw: str) -> dict:
-    cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    return json.loads(match.group(0)) if match else {}
+    return parse_json_object(raw)
 
 
 def propose(
@@ -228,8 +237,30 @@ def propose(
                 "reason": item.get("reason", ""),
                 "ratio": ratio,
                 "topic": (item.get("topic") or "기타").strip(),
+                "local": _is_local(keyword, areas),
             }
         )
+
+    # '강서구주간보호센터'와 '강서구 주간보호센터'는 네이버에서 같은 검색어인데(검색광고가 띄어쓰기를
+    # 지운 형태로 돌려줍니다), 연관키워드에 둘 다 나와 둘 다 채택되면 같은 말이 풀 두 자리를
+    # 차지했습니다. 하나만 남깁니다 — 지금 쓰는 표기, 없으면 띄어 쓴 표기를.
+    seen: Dict[str, str] = {}
+    for gkey in groups:
+        for row in groups[gkey]:
+            norm = keyword_research.normalize(row["keyword"])
+            other = seen.get(norm)
+            if other is None:
+                seen[norm] = row["keyword"]
+                continue
+            pick = max((other, row["keyword"]), key=lambda k: (k in current, " " in k))
+            seen[norm] = pick
+    for gkey in groups:
+        dupes = [r for r in groups[gkey] if seen[keyword_research.normalize(r["keyword"])] != r["keyword"]]
+        excluded.extend(
+            {**r, "reason": f"'{seen[keyword_research.normalize(r['keyword'])]}'와 띄어쓰기만 다른 같은 검색어"}
+            for r in dupes
+        )
+        groups[gkey] = [r for r in groups[gkey] if r not in dupes]
 
     for item in parsed.get("excluded", []):
         keyword = (item.get("keyword") or "").strip()
@@ -263,11 +294,14 @@ def propose(
     # one category shouldn't outrank two high-demand ones in another just by
     # being numerous. Identity is exempt — it is the brand's own vocabulary
     # and belongs in the pool whatever the dominant commercial topic is.
+    # Local keywords are exempt too — see LOCAL_LIMIT.
     weights: Dict[str, int] = {}
     for gkey, rows in groups.items():
         if gkey == "identity":
             continue
         for row in rows:
+            if row["local"]:
+                continue
             weights[row["topic"]] = weights.get(row["topic"], 0) + (row.get("estimated_volume") or 0)
 
     focus = [t for t, _ in sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:TOPIC_LIMIT]]
@@ -276,13 +310,28 @@ def propose(
             continue
         kept_rows = []
         for row in rows:
-            if row["topic"] in focus:
+            if row["topic"] in focus or row["local"]:
                 kept_rows.append(row)
             else:
                 excluded.append(
                     {**row, "reason": f"주제 분산 — '{'·'.join(focus)}'에 집중"}
                 )
         groups[gkey] = kept_rows
+
+    local_rows = sorted(
+        (r for gkey, rows in groups.items() if gkey != "identity" for r in rows if r["local"]),
+        key=lambda r: r.get("estimated_volume") or 0, reverse=True,
+    )
+    overflow_local = {r["keyword"] for r in local_rows[LOCAL_LIMIT:]}
+    if overflow_local:
+        for gkey in groups:
+            if gkey == "identity":
+                continue
+            excluded.extend(
+                {**r, "reason": f"동네 키워드 {LOCAL_LIMIT}개 초과(검색량 순)"}
+                for r in groups[gkey] if r["keyword"] in overflow_local
+            )
+            groups[gkey] = [r for r in groups[gkey] if r["keyword"] not in overflow_local]
 
     for group in groups.values():
         group.sort(key=lambda r: r.get("score") or 0, reverse=True)
@@ -300,6 +349,7 @@ def propose(
         )
 
     accepted = [r["keyword"] for g in groups.values() for r in g]
+    removed = [k for k in current if k not in accepted]
     return {
         "groups": groups,
         "focus": focus,
@@ -307,7 +357,9 @@ def propose(
         "current": current,
         "accepted": accepted,
         "added": [k for k in accepted if k not in current],
-        "removed": [k for k in current if k not in accepted],
+        "removed": removed,
+        # 담당자가 이미 쓰던 동네 키워드 — 화면이 경고하고 되살리기를 미리 체크해 둡니다.
+        "removed_local": [k for k in removed if _is_local(k, areas)],
         "kept": [k for k in accepted if k in current],
     }
 

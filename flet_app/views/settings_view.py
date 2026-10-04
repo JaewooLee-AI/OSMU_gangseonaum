@@ -921,6 +921,21 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                     scale, color="#1B6E3C", bg="#E8F5E9",
                 ))
 
+            # 기본값 그대로 [적용]을 누르면 지금 쓰는 키워드가 조용히 빠졌습니다 — 무엇이 빠지는지
+            # 먼저 보이고, 담당자가 고른 동네 키워드는 되살리기를 미리 체크해 둡니다.
+            removed = proposal.get("removed") or []
+            removed_local = set(proposal.get("removed_local") or [])
+            if removed:
+                controls.append(_warn_box(
+                    f"⚠️ 지금 쓰는 SEO 키워드 {len(removed)}개가 빠집니다: {', '.join(removed)}"
+                    + (
+                        f"\n동네 키워드 {len(removed_local)}개({', '.join(sorted(removed_local))})는 "
+                        "아래 [제외됨]에서 되살리기를 미리 체크해 두었습니다 — 빼려면 체크를 해제하세요."
+                        if removed_local else ""
+                    ),
+                    scale,
+                ))
+
             for gkey, glabel in keyword_curator.INTENT_GROUPS.items():
                 rows = proposal["groups"].get(gkey) or []
                 if not rows:
@@ -942,9 +957,13 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                 vol, docs = row.get("estimated_volume"), row.get("documents")
                 return (docs / vol) if (vol and docs) else None
 
+            # 미리 체크한 동네 키워드가 접힌 '나머지'에 묻히지 않도록 맨 앞에 둡니다.
             excluded = sorted(
                 proposal["excluded"],
-                key=lambda r: _ratio_of(r) if _ratio_of(r) is not None else 9e9,
+                key=lambda r: (
+                    r["keyword"] not in removed_local,
+                    _ratio_of(r) if _ratio_of(r) is not None else 9e9,
+                ),
             )
             if excluded:
                 controls.append(ft.Text(
@@ -960,7 +979,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                         + (f" · 경쟁 {ratio:.0f}배" if ratio is not None else " · 경쟁 미측정")
                         + f" · {row.get('reason', '')}"
                     )
-                    cb = ft.Checkbox(label=label)
+                    cb = ft.Checkbox(label=label, value=row["keyword"] in removed_local)
                     revive_checkboxes.append((row["keyword"], cb))
                     return cb
 
