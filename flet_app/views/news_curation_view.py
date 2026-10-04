@@ -37,7 +37,14 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     brand_kit = repo.get_brand_kit()
     seo_keywords = brand_kit.get("seo_keywords") or []
     # 검색량 상위 3개를 기본 선택 — 뉴스가 실제로 걸릴 확률은 검색량과 같이 간다.
-    default_keywords = set(sorted(seo_keywords, key=_volume_of, reverse=True)[:3])
+    # 브랜드 킷에서 '검색 타깃'을 해제한 키워드는 빼고 고릅니다. 해제는 '이 말로 글을 만들지
+    # 않는다'는 뜻인데, 검색량이 가장 큰 장기요양등급·장기요양등급신청·장기요양보험(고객 확인 전이라
+    # 타깃 해제)이 그대로 기본 선택되어 그 주제의 뉴스 글이 만들어질 뻔했습니다. 칩은 남겨 두어
+    # 담당자가 직접 고를 수는 있습니다.
+    non_targets = set(brand_kit.get("non_target_keywords") or [])
+    default_keywords = set(
+        sorted((k for k in seo_keywords if k not in non_targets), key=_volume_of, reverse=True)[:3]
+    )
 
     controls: list[ft.Control] = [
         ft.Text("뉴스 큐레이션", size=fs(24, scale), weight=ft.FontWeight.BOLD),
