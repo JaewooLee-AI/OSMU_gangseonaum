@@ -47,7 +47,12 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from ai_workers.multi_llm_router import get_vision_vendor, google_client, load_vendor_config
+from ai_workers.multi_llm_router import (
+    GOOGLE_NO_ZERO_THINKING,
+    get_vision_vendor,
+    google_client,
+    load_vendor_config,
+)
 from core import repo, storage
 
 # 사진 설명에 이 표시가 붙으면 개인정보가 찍힌 사진입니다 — content_writer가 리포트로 올립니다.
@@ -244,7 +249,7 @@ def _call_google(model: str, api_key: str, images: List[bytes], max_tokens: int)
     # 3-image batches failed that way and had to be split and re-sent, which
     # meant paying the image tokens twice — 42% of a run's vision spend.
     config_kwargs = {"max_output_tokens": max_tokens}
-    if hasattr(types, "ThinkingConfig"):
+    if hasattr(types, "ThinkingConfig") and model not in GOOGLE_NO_ZERO_THINKING:
         try:
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
         except Exception:  # noqa: BLE001 — model without a tunable budget
@@ -263,6 +268,7 @@ def _call_google(model: str, api_key: str, images: List[bytes], max_tokens: int)
         res = client.models.generate_content(
             model=model, contents=parts, config=types.GenerateContentConfig(**config_kwargs)
         )
+        GOOGLE_NO_ZERO_THINKING.add(model)
 
     meta = getattr(res, "usage_metadata", None)
     used_in = getattr(meta, "prompt_token_count", 0) or 0
