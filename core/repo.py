@@ -240,6 +240,9 @@ def update_campaign(campaign_id: str, **fields) -> None:
             f"update campaigns set {assignments}, updated_at = datetime('now') where id = ?",
             tuple(encoded.values()) + (campaign_id,),
         )
+    # 추천 주제의 ✅는 게시 완료 때 붙습니다 — 글을 만들기만 한 주제는 계속 권합니다.
+    if fields.get("status") == "published":
+        _mark_topic_published(campaign_id)
 
 
 def publish_stats() -> Dict[str, Any]:
@@ -269,16 +272,55 @@ def publish_stats() -> Dict[str, Any]:
     }
 
 
+# 주제 캘린더로 연 글의 메모 첫 줄 — flet_app/views/dashboard_view._start_topic이 씁니다.
+TOPIC_MEMO_PREFIX = "[주제] "
+_PUBLISHED_TOPICS_KEY = "published_topics"
+_TOPIC_LINKS_KEY = "topic_campaigns"
+
+
+def _topic_of(campaign: Dict[str, Any], links: Dict[str, str]) -> Optional[str]:
+    """이 글을 연 추천 주제. [이 주제로 새 글]로 연 글은 그때 남긴 연결을, 그 기록이
+    생기기 전의 글은 메모 첫 줄을 봅니다 — 담당자가 메모를 고쳐도 연결은 남습니다."""
+    if campaign["id"] in links:
+        return links[campaign["id"]]
+    first_line = (campaign.get("memo") or "").split("\n", 1)[0]
+    if first_line.startswith(TOPIC_MEMO_PREFIX):
+        return first_line[len(TOPIC_MEMO_PREFIX):].strip() or None
+    return None
+
+
 def used_topic_titles() -> set:
-    """주제 캘린더에서 이미 글로 만든 주제 — 삭제한 글의 주제도 다시 권하지 않도록
-    app_state에 따로 남깁니다(title_history와 같은 이유)."""
-    return set((get_app_state("used_topics") or {}).get("titles") or [])
+    """주제 캘린더에서 네이버 게시까지 끝낸 주제 — 삭제한 글의 주제도 다시 권하지 않도록
+    app_state에 따로 남깁니다(title_history와 같은 이유).
+
+    예전에는 [이 주제로 새 글]을 누르는 순간 기록해서(used_topics), 생성에 실패했거나
+    지운 글의 주제에도 ✅가 붙었습니다. 그 기록은 버리고, 처음 읽을 때 이미 게시된 글에서
+    한 번 다시 채웁니다."""
+    state = get_app_state(_PUBLISHED_TOPICS_KEY)
+    if state is not None:
+        return set(state.get("titles") or [])
+    links = get_app_state(_TOPIC_LINKS_KEY) or {}
+    titles = {t for c in list_campaigns(statuses=["published"]) if (t := _topic_of(c, links))}
+    set_app_state(_PUBLISHED_TOPICS_KEY, {"titles": sorted(titles)})
+    clear_app_state("used_topics")
+    return titles
 
 
-def mark_topic_used(title: str) -> None:
+def link_topic(campaign_id: str, title: str) -> None:
+    """추천 주제로 연 글을 그 주제와 이어 둡니다 — 게시 완료 때 ✅를 붙일 주제입니다."""
+    links = get_app_state(_TOPIC_LINKS_KEY) or {}
+    links[campaign_id] = title
+    set_app_state(_TOPIC_LINKS_KEY, links)
+
+
+def _mark_topic_published(campaign_id: str) -> None:
+    campaign = get_campaign(campaign_id)
+    title = campaign and _topic_of(campaign, get_app_state(_TOPIC_LINKS_KEY) or {})
+    if not title:
+        return
     titles = used_topic_titles()
-    titles.add(title)
-    set_app_state("used_topics", {"titles": sorted(titles)})
+    if title not in titles:
+        set_app_state(_PUBLISHED_TOPICS_KEY, {"titles": sorted(titles | {title})})
 
 
 class CampaignBusyError(RuntimeError):

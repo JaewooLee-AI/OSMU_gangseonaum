@@ -202,12 +202,12 @@ def _start_topic(state, topic: dict) -> None:
     created = repo.insert_campaign(
         source_type="manual",
         status="awaiting_media",
-        memo=f"[주제] {topic['title']}\n{topic['memo']}",
+        memo=f"{repo.TOPIC_MEMO_PREFIX}{topic['title']}\n{topic['memo']}",
         post_type=topic.get("post_type"),
         content_mode=mode,
         product_fields=post_types.default_product_fields(topic.get("post_type"), brand_kit, {}),
     )
-    repo.mark_topic_used(topic["title"])
+    repo.link_topic(created["id"], topic["title"])
     state.pending_workbench_campaign_id = created["id"]
     if state.navigate_to_workbench:
         state.navigate_to_workbench()
