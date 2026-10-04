@@ -270,8 +270,11 @@ def _call_google(model_name, api_key, prompt, system, max_tokens):
     except Exception as exc:  # noqa: BLE001
         # Some models (e.g. 2.5 Pro) refuse a zero thinking budget. Fall back
         # to thinking-on with headroom rather than failing the call — but only
-        # for that specific rejection, not for auth/quota errors.
-        if "thinking" not in str(exc).lower():
+        # for that specific rejection, not for auth/quota errors. 2.5 Pro says
+        # "thinking" in the message; gemini-3.5-flash-lite answers the same
+        # config with a bare "400 INVALID_ARGUMENT" that names nothing, so a
+        # 400 counts too (auth is 401/403 and quota 429 — still raised).
+        if "thinking" not in str(exc).lower() and getattr(exc, "code", None) != 400:
             raise
         res = client.models.generate_content(model=model_name, contents=prompt, config=_config(False))
 
