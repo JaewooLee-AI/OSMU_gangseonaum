@@ -19,11 +19,9 @@ content_writer._guarded_daangn).
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import List
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 from ai_workers.prompt_builder import brand_voice_blocks
 
 DAANGN_SYSTEM_PROMPT_BASE = (
@@ -51,9 +49,7 @@ def build_system_prompt(brand_kit: dict) -> str:
 
 def _parse_response(raw: str, fallback_text: str) -> dict:
     try:
-        cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        parsed = parse_json_object(raw)
         return {
             "title": str(parsed.get("title") or "").strip(),
             "body": str(parsed.get("body") or fallback_text).strip(),

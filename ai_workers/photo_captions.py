@@ -19,12 +19,11 @@ the prompt forbids personal details outright.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Dict, List
 
 from ai_workers.guardrail import apply_blacklist_dictionary
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 from ai_workers.photo_placement import IMAGE_TAG_RE
 
 MAX_CHARS = 40
@@ -85,9 +84,7 @@ def write_captions(
     prompt = f"[제목] {title}\n[본문 앞부분]\n{body[:1200]}\n\n[사진 목록]\n" + "\n".join(lines)
     try:
         raw = generate_text(vendor=vendor, prompt=prompt, system=SYSTEM_PROMPT, max_tokens=1200, note="photo-captions")
-        cleaned = re.sub(r"```json\s*|```\s*$", "", (raw or "").strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        items = json.loads(match.group(0)).get("captions", []) if match else []
+        items = parse_json_object(raw).get("captions", [])
     except Exception as exc:  # noqa: BLE001 — captions never fail a run
         print(f"[photo_captions] skipped: {exc}")
         items = []

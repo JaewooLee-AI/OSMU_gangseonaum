@@ -15,12 +15,11 @@ so the copy is short enough to survive them.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import List
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 from ai_workers.prompt_builder import brand_voice_blocks
+from ai_workers.sns_validator import SHORTS_CAPTION_MAX
 
 SHORTS_SYSTEM_PROMPT_BASE = (
     "당신은 숏폼(유튜브 쇼츠/인스타 릴스) 영상 기획자입니다. 15~30초 분량의 세로형(9:16) "
@@ -28,7 +27,7 @@ SHORTS_SYSTEM_PROMPT_BASE = (
     "- 첫 1~2초 안에 시청자를 붙잡지 못하면 스와이프됩니다. 첫 컷의 자막은 질문이나 "
     "의외의 장면 묘사로 시작하세요.\n"
     "- 화면 우측(버튼)과 하단(캡션·프로필)은 UI에 가려집니다. 자막은 화면 중앙 밴드에 들어가야 "
-    "하므로 한 컷당 자막은 공백 포함 20자 이내로 짧게 쓰세요.\n"
+    "하므로 한 컷당 자막은 공백 포함 15자 안팎, 최대 20자로 짧게 쓰세요. 첫 컷 자막(hook)도 같습니다.\n"
     "- 컷은 4~6개로 구성하고, 각 컷마다 '무엇을 찍는지'(촬영 지시)와 '화면에 뜨는 자막'을 "
     "분리해서 쓰세요.\n"
     "- 마지막 컷에는 자연스러운 마무리 또는 행동 유도를 넣습니다.\n"
@@ -45,9 +44,7 @@ def build_system_prompt(brand_kit: dict) -> str:
 
 def _parse_response(raw: str, fallback_text: str) -> dict:
     try:
-        cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        parsed = parse_json_object(raw)
         scenes = []
         for scene in parsed.get("scenes") or []:
             if isinstance(scene, dict):
@@ -89,4 +86,61 @@ def write_shorts_script(
         max_tokens=900,
         note="shorts-script",
     )
-    return _parse_response(raw, note)
+    return shorten_long_captions(_parse_response(raw, note), vendor)
+
+
+SHORTEN_ROUNDS = 2
+
+SHORTEN_SYSTEM_PROMPT = (
+    "당신은 숏폼 영상 자막 편집자입니다. 아래 자막을 각각 **공백 포함 15자 안팎, 최대 20자**로 "
+    "줄이세요. 뜻과 말투는 유지하고, 숫자·날짜·이름 같은 사실은 빼거나 바꾸지 마세요. "
+    "번호 순서대로 같은 개수를 돌려주세요.\n"
+    '반드시 아래 JSON만 출력하세요: {"captions": ["1번 자막", "2번 자막"]}'
+)
+
+
+def shorten_long_captions(script: dict, vendor: str) -> dict:
+    """Shortens only the captions over SHORTS_CAPTION_MAX, in one small call.
+
+    The prompt has always said 20자 이내, and on every 2026-10-04 test run the
+    model still wrote 21~25자 hook/cut captions — models don't count Korean
+    characters reliably, so the length is checked here instead of trusted.
+    A rewrite is kept only when it actually fits; otherwise the original stays
+    and sns_validator still reports it.
+    """
+    scenes = script.get("scenes") or []
+    slots = [("hook", None)] + [("scene", i) for i in range(len(scenes))]
+
+    def text_of(slot) -> str:
+        kind, i = slot
+        return (script.get("hook") if kind == "hook" else scenes[i].get("caption")) or ""
+
+    # A second round takes only what the first one still left too long.
+    for _ in range(SHORTEN_ROUNDS):
+        long_slots = [slot for slot in slots if len(text_of(slot)) > SHORTS_CAPTION_MAX]
+        if not long_slots:
+            return script
+        try:
+            raw = generate_text(
+                vendor=vendor,
+                prompt="\n".join(
+                    f"{n}. {text_of(slot)} (지금 {len(text_of(slot))}자)" for n, slot in enumerate(long_slots, 1)
+                ),
+                system=SHORTEN_SYSTEM_PROMPT,
+                max_tokens=400,
+                note="shorts-shorten",
+            )
+            shorter = [str(c).strip() for c in (parse_json_object(raw).get("captions") or [])]
+        except Exception as exc:  # noqa: BLE001 — shortening never fails the script
+            print(f"[shorts_writer] shorten skipped: {exc}")
+            return script
+        if len(shorter) != len(long_slots):
+            return script
+        for (kind, i), text in zip(long_slots, shorter):
+            if not text or len(text) > SHORTS_CAPTION_MAX:
+                continue
+            if kind == "hook":
+                script["hook"] = text
+            else:
+                scenes[i]["caption"] = text
+    return script

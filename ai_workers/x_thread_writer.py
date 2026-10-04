@@ -10,11 +10,9 @@ caption or body.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import List
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 from ai_workers.prompt_builder import brand_voice_blocks
 
 # X weighs each Korean character as 2 against its 280 budget, so the working
@@ -44,9 +42,7 @@ def build_system_prompt(brand_kit: dict) -> str:
 
 def _parse_response(raw: str, fallback_text: str) -> dict:
     try:
-        cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        parsed = parse_json_object(raw)
         tweets = [str(t).strip() for t in (parsed.get("tweets") or []) if str(t).strip()]
         if not tweets:
             tweets = [fallback_text]

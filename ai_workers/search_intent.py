@@ -29,11 +29,9 @@ the price actually is.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import List
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 
 # Below this, the article is answering less than half of what its own keyword
 # promises. Not a hard gate — a photo-led brand post can legitimately score
@@ -57,9 +55,7 @@ AUDIT_SYSTEM_PROMPT = (
 )
 
 def _parse(raw: str) -> dict:
-    cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    return json.loads(match.group(0)) if match else {}
+    return parse_json_object(raw)
 
 
 def audit(title: str, content: str, keyword: str, vendor: str) -> dict:

@@ -21,6 +21,13 @@ from core import repo
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
+# 그 업종에서 *일하려는* 사람을 위한 기사 — 자격증·채용·수강생 모집. 브랜드 키워드가
+# '정리수납전문가'·'요양보호사'처럼 직업 이름이기도 해서 이런 기사가 섞여 들어왔고,
+# 2026-10-04 점검에서는 '정리수납전문가 자격증 무료수강 이벤트' 기사로 고객 블로그 글이
+# 만들어졌습니다. 블로그 독자는 고객이라, 브랜드 킷의 제외어와 별개로 항상 뺍니다
+# (keyword_curator가 구직 검색어를 빼는 것과 같은 기준).
+JOBSEEKER_TERMS = ["자격증", "채용", "구인", "구직", "국비지원", "수강생", "교육생", "무료수강"]
+
 
 def fetch_google_news_rss(keyword: str, max_results: int = 5) -> list[dict]:
     """Google News RSS search — no API key needed, returns Korean results."""
@@ -177,9 +184,10 @@ def search_news_by_keywords(
     `exclude_terms` (Brand Kit `news_exclude_terms`) drops articles whose
     title or summary carries one of them, spacing ignored — the brand's
     keywords are generic nouns ('가사도우미') that also headline policy
-    debates the brand should not be newsjacking.
+    debates the brand should not be newsjacking. JOBSEEKER_TERMS are always
+    dropped on top of them.
     """
-    blocked = [t.replace(" ", "") for t in (exclude_terms or []) if t and t.strip()]
+    blocked = [t.replace(" ", "") for t in list(exclude_terms or []) + JOBSEEKER_TERMS if t and t.strip()]
     known_urls = repo.list_known_source_urls()
     seen_urls = set(known_urls)
     results = []

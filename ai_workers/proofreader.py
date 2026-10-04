@@ -24,11 +24,9 @@ Two design choices carry the risk here:
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Dict, List, Optional, Tuple
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 
 SYSTEM_PROMPT = (
     "당신은 한국어 교정 전문가입니다. 아래 글에서 **명백한 오탈자, 맞춤법 오류, 띄어쓰기 오류, "
@@ -94,9 +92,7 @@ def proofread(
             max_tokens=1200,
             note="proofread",
         )
-        cleaned = re.sub(r"```json\s*|```\s*$", "", (raw or "").strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        corrections = json.loads(match.group(0)).get("corrections", []) if match else []
+        corrections = parse_json_object(raw).get("corrections", [])
     except Exception as exc:  # noqa: BLE001
         print(f"[proofreader] skipped: {exc}")
         return text, [], []

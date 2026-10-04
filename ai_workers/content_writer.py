@@ -71,7 +71,7 @@ from ai_workers.seo_optimizer import (
     title_candidates,
     title_keyword_coverage,
 )
-from ai_workers.shorts_writer import write_shorts_script
+from ai_workers.shorts_writer import shorten_long_captions, write_shorts_script
 from ai_workers.sns_validator import (
     validate_daangn,
     validate_instagram,
@@ -271,10 +271,12 @@ def _recommendation(report: Dict) -> Dict:
     # 메모에 없으면 다시 생성해도 같은 길이이거나, 브랜드 소개로 채워집니다.
     length = report.get("length") or {}
     too_short = bool(length.get("short"))
+    # 긴 글은 입력의 공백이 아니라 덜어낼 일입니다 — [수정 반영]의 '20% 짧게'로 안내합니다.
+    too_long = bool(length.get("long"))
 
     if reasons:
         verdict = "regenerate"
-    elif conflicts or no_targets or intent_gap or fact_gaps or body_similar or too_short:
+    elif conflicts or no_targets or intent_gap or fact_gaps or body_similar or too_short or too_long:
         verdict = "settings"
     else:
         verdict = "ok"
@@ -290,15 +292,23 @@ def _recommendation(report: Dict) -> Dict:
         "body_similar_to": variety.get("similar_to") if body_similar else None,
         "body_similarity": variety.get("score") if body_similar else None,
         "too_short": too_short,
+        "too_long": too_long,
         "length_chars": length.get("chars"),
         "length_target": length.get("target"),
     }
 
 
+# 제목과 본문을 교정 한 번에 보내는 표시 — _quality_pass 참고.
+_TITLE_PREFIX = "[제목] "
+_BODY_MARKER = "\n\n[본문]\n"
+
 # Below this share of the target's lower bound a post is reported as short.
 # Not the bound itself: a model aiming for 1,500 lands a little either side,
 # and flagging 1,420자 would train the marketer to ignore the warning.
 LENGTH_SHORT_RATIO = 0.8
+# Above this share of the upper bound it is reported as long. 공지 정보를 많이 넣은 글이
+# 목표 2,000자에 2,842자로 나왔는데 리포트는 아무 말도 하지 않았습니다 — 짧음만 쟀기 때문입니다.
+LENGTH_LONG_RATIO = 1.25
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
@@ -314,6 +324,7 @@ def measure_length(content: str, target=None) -> Dict:
     avg = round(sum(len(s) for s in sentences) / len(sentences)) if sentences else 0
     out = {"chars": chars, "avg_sentence": avg, "target": list(target) if target else None}
     out["short"] = bool(target) and chars < target[0] * LENGTH_SHORT_RATIO
+    out["long"] = bool(target) and chars > target[1] * LENGTH_LONG_RATIO
     return out
 
 
@@ -415,8 +426,21 @@ def _quality_pass(
     # rewrites above are themselves fresh LLM output that can introduce
     # errors. Placed before the deterministic backstops so those still have
     # the last word on image tags and banned terms.
+    #
+    # The title goes through the same call. It never did, so '보모님 믿고 맡길
+    # 강서구 주간보호센터 검증법' shipped with a typo in the most visible line of
+    # the post. Joined with a marker and split back; if a correction somehow
+    # touches the marker, the title is left as it was and the body still gets
+    # its corrections from a second pass.
     _report(progress, "맞춤법·오탈자 교정 중…")
-    final_content, applied_fixes, rejected_fixes = proofread(final_content, brand_kit, vendor)
+    combined = f"{_TITLE_PREFIX}{final_title}{_BODY_MARKER}{final_content}"
+    corrected, applied_fixes, rejected_fixes = proofread(combined, brand_kit, vendor)
+    if corrected.startswith(_TITLE_PREFIX) and corrected.count(_BODY_MARKER) == 1:
+        head, final_content = corrected.split(_BODY_MARKER)
+        report["proofread_title"] = head[len(_TITLE_PREFIX):].strip() or final_title
+    else:
+        final_content, applied_fixes, rejected_fixes = proofread(final_content, brand_kit, vendor)
+        report["proofread_title"] = final_title
     report["proofread"] = {"applied": applied_fixes, "rejected": rejected_fixes}
 
     # --- stages 5~6: deterministic backstops ---
@@ -759,6 +783,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             storage_file_paths, is_news, source_url, progress, mode, notice_fields,
             product_fields, history=post_history,
         )
+        final_title = report.pop("proofread_title", final_title)
         report["title_dictionary_hits"] = title_dict_hits
         report["title_seo"] = {
             "checked": bool(needs_title and seo_keywords),
@@ -817,6 +842,9 @@ LENGTH_MODES = {
     "longer": {"label": "20% 길게", "ratio": 1.2},
     "shorter": {"label": "20% 짧게", "ratio": 0.8},
 }
+# 분량 조정 결과가 목표에서 이만큼 넘게 벗어나면 다시 맞추게 합니다(최대 LENGTH_RETRIES번).
+LENGTH_TOLERANCE = 0.1
+LENGTH_RETRIES = 2
 
 REVISION_SYSTEM_PROMPT = (
     "당신은 네이버 블로그 편집자입니다. 아래 본문을 담당자의 요청에 따라 고쳐 쓰세요. "
@@ -890,6 +918,7 @@ def revise_content(
         # 줄여 쓰기 요청은 군더더기부터 덜어내는데, 공지·제품 글에서 가장
         # 군더더기처럼 보이는 줄이 정작 일시·가격·주문 방법입니다. 수정 호출이
         # 실제로 일어날 때만 붙입니다.
+        fact_lock: List[str] = []
         if requests:
             kept_lines = []
             for sheet, given in (
@@ -901,10 +930,11 @@ def revise_content(
                     for k, v in factsheet.clean(sheet, given).items()
                 ]
             if kept_lines:
-                requests.append(
+                fact_lock = [
                     "[핵심 정보 유지]\n다음 사실은 이 글의 존재 이유이므로 어떤 수정 "
                     "요청에도 본문에서 빼거나 바꾸지 마세요:\n" + "\n".join(kept_lines)
-                )
+                ]
+                requests += fact_lock
 
         if requests:
             _report(progress, "수정 요청 반영 중…")
@@ -917,6 +947,34 @@ def revise_content(
                 note=f"revision:{length_mode}",
             )
             revised = ensure_image_tags_preserved(base_content, revised.strip() or base_content)
+
+            # 목표 글자 수를 알려줘도 모델은 거의 줄이지 않았습니다 — 2026-10-04 실측 '20% 짧게'
+            # 네 번 중 세 번이 0.97~0.99배였습니다. 결과를 재서 목표에서 벗어나면 실제 글자 수를
+            # 알려주고 다시 맞추게 합니다.
+            if ratio:
+                for _ in range(LENGTH_RETRIES):
+                    off = len(revised) / target
+                    if (off <= 1 + LENGTH_TOLERANCE) if ratio < 1 else (off >= 1 - LENGTH_TOLERANCE):
+                        break
+                    _report(progress, "분량 다시 맞추는 중…")
+                    adjust = (
+                        f"[분량 조정]\n이 본문은 {len(revised)}자로, 목표 {target}자보다 "
+                        + (
+                            f"{len(revised) - target}자 깁니다. 문단마다 덜 중요한 문장을 한두 개씩 "
+                            f"빼서 반드시 {target}자 안팎(±10%)으로 줄이세요. 핵심 메시지와 사진 태그는 유지하세요."
+                            if ratio < 1 else
+                            f"{target - len(revised)}자 짧습니다. 새로운 사실을 지어내지 말고 기존 내용의 "
+                            f"묘사와 설명을 풀어 써서 반드시 {target}자 안팎(±10%)으로 늘리세요."
+                        )
+                    )
+                    again = generate_text(
+                        vendor=vendor,
+                        prompt=f"[현재 본문]\n{revised}\n\n" + "\n\n".join([adjust] + fact_lock),
+                        system=REVISION_SYSTEM_PROMPT,
+                        max_tokens=max(2500, int(target / 2) + 800),
+                        note=f"revision:{length_mode}:retry",
+                    )
+                    revised = ensure_image_tags_preserved(base_content, again.strip() or revised)
         else:
             # No instruction and no length change: the marketer just wants
             # their edits checked. _quality_pass still proofreads and re-audits,
@@ -940,6 +998,12 @@ def revise_content(
             campaign.get("notice_fields") or {}, campaign.get("product_fields") or {},
             history=repo.recent_posts(exclude_id=campaign_id, limit=body_variety.HISTORY_LIMIT),
         )
+        # 담당자가 고친 제목의 오타도 여기서 같이 잡힙니다 — 바뀌었을 때만 저장합니다.
+        title_fields = {}
+        proofread_title = report.pop("proofread_title", final_title)
+        if campaign.get("title") and proofread_title != final_title:
+            final_title = proofread_title
+            title_fields["title"] = final_title
         report["revision"] = {
             "instruction": instruction,
             "length_mode": length_mode,
@@ -994,6 +1058,7 @@ def revise_content(
             guardrail_report=report,
             naver_hashtags=naver_hashtags,
             photo_captions=photo_captions,
+            **title_fields,
         )
         _report(progress, "완료")
         return repo.get_campaign(campaign_id)
@@ -1211,6 +1276,16 @@ def _secondary_channels(
 
     _report(progress, "SNS 맞춤법·오탈자 교정 중…")
     sns_proofread = _proofread_sns(instagram, x_result, shorts, brand_kit, vendor, daangn)
+
+    # 쇼츠 자막은 작성 직후 20자 안으로 줄여 두지만, 위의 검수 치환과 띄어쓰기 교정이 다시
+    # 늘리기도 합니다(2026-10-04 재점검: 줄인 뒤 21자로 돌아온 컷). 넘친 것만 한 번 더 줄이고,
+    # 줄인 문구에도 금기어 사전을 다시 씌워 검수에서 바꾼 표현이 되살아나지 않게 합니다.
+    if shorts.get("scenes") or shorts.get("hook"):
+        shorts = shorten_long_captions(shorts, vendor)
+        blacklist = brand_kit.get("blacklist_map", {})
+        shorts["hook"], _ = apply_blacklist_dictionary(shorts.get("hook") or "", blacklist)
+        for scene in shorts.get("scenes") or []:
+            scene["caption"], _ = apply_blacklist_dictionary(scene.get("caption") or "", blacklist)
 
     # --- platform format checks ---
     # The writers are only *told* the limits. Verify: an over-long tweet is

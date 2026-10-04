@@ -33,11 +33,10 @@ Only invoked when the Brand Kit guardrail toggle is on.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Dict, List, Optional, Tuple
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 
 AUDIT_SYSTEM_PROMPT = (
     "당신은 대한민국 「표시·광고의 공정화에 관한 법률」, 「가사근로자의 고용개선 등에 관한 법률」, "
@@ -571,11 +570,9 @@ def run_llm_audit(
         return _failed_audit(text, f"검수 호출 실패: {exc}")
 
     try:
-        cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
+        parsed = parse_json_object(raw)
+        if not parsed:
             return _failed_audit(text, "검수 응답에서 결과(JSON)를 찾지 못했습니다", raw)
-        parsed = json.loads(match.group(0))
         issues = parsed.get("issues") or []
         grounded, unverified, phrase_map, misfiled = _classify_issues(issues, text)
         # 모델이 스스로 suggestions에 넣은 것도 그대로 믿지는 않습니다. 첫 5건

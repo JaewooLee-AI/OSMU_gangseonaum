@@ -11,10 +11,8 @@ just displays these for the marketer to copy/paste at publish time.
 """
 from __future__ import annotations
 
-import json
-import re
 
-from ai_workers.multi_llm_router import generate_text
+from ai_workers.multi_llm_router import generate_text, parse_json_object
 
 HASHTAG_SYSTEM_PROMPT = (
     "당신은 네이버 블로그 SEO 전문가입니다. 아래 블로그 글의 제목과 본문을 분석해서, "
@@ -51,9 +49,7 @@ def write_naver_hashtags(
     prompt = f"[제목]\n{title}\n\n[본문]\n{content[:3000]}{keyword_hint}{area_hint}"
     raw = generate_text(vendor=vendor, prompt=prompt, system=HASHTAG_SYSTEM_PROMPT, max_tokens=400, note="naver-hashtags")
     try:
-        cleaned = re.sub(r"```json\s*|```\s*$", "", raw.strip())
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        parsed = parse_json_object(raw)
         tags = parsed.get("hashtags") or []
         return [t if str(t).startswith("#") else f"#{t}" for t in tags]
     except Exception:

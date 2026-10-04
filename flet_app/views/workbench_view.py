@@ -176,7 +176,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             )
         else:
             def reload() -> None:
-                load_editor(campaign_id, live=True)
+                # 목록까지 다시 만듭니다 — 편집 영역만 다시 그리면 초안 생성 뒤에도 위
+                # [작업할 콘텐츠] 칸이 '(제목 없음) · awaiting_media'로 남았습니다.
+                refresh_list(campaign_id)
 
             def refresh_sim() -> None:
                 sim_box.content = _build_sim_panel(campaign_id, scale, sim_state, refresh_sim)
@@ -1239,7 +1241,7 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
     if length:
         target = length.get("target")
         target_text = f" · 목표 {target[0]:,}~{target[1]:,}자" if target else " · 짧은 공지라 분량 목표 없음"
-        icon = "📏" if not length.get("short") else "🔸"
+        icon = "🔸" if (length.get("short") or length.get("long")) else "📏"
         body.append(ft.Text(
             f"{icon} 본문 {length.get('chars', 0):,}자(공백 제외){target_text} · 평균 문장 {length.get('avg_sentence', 0)}자",
             size=fs(11, scale),
@@ -1284,6 +1286,15 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
                 "짧습니다. 서비스를 잘 모르는 독자는 사진보다 설명을 읽습니다. 메모에 설명할 재료 — 어떤 "
                 "집에서 무엇을 요청했는지, 어떤 순서로 진행했는지, 누구에게 맞는지, 고객 반응 — 를 더하거나 "
                 "🧹 서비스·이용 정보를 채운 뒤 다시 생성하세요.",
+                size=fs(11, scale),
+            ))
+
+        if recommendation.get("too_long"):
+            target = recommendation.get("length_target") or [0, 0]
+            body.append(ft.Text(
+                f"🔸 본문이 {recommendation.get('length_chars') or 0:,}자로 목표({target[0]:,}~{target[1]:,}자)보다 "
+                "깁니다. 모바일에서 끝까지 읽히기 어렵습니다. [✏️ 수정 반영]에서 분량을 '20% 짧게'로 "
+                "골라 줄이세요 — 공지·서비스 정보에 입력한 사실은 그대로 남습니다.",
                 size=fs(11, scale),
             ))
 

@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import math
 import re
 from typing import Dict, List, Optional, Tuple
@@ -49,6 +48,7 @@ from PIL import Image
 
 from ai_workers.multi_llm_router import (
     GOOGLE_NO_ZERO_THINKING,
+    parse_json_object,
     get_vision_vendor,
     google_client,
     load_vendor_config,
@@ -202,8 +202,7 @@ def _parse_captions(raw: str, expected: int) -> Tuple[List[str], bool]:
     cleaned = re.sub(r"```json\s*|```\s*$", "", (raw or "").strip())
 
     try:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        parsed = json.loads(match.group(0)) if match else {}
+        parsed = parse_json_object(cleaned)
         captions = [str(c).strip() for c in (parsed.get("captions") or []) if str(c).strip()]
         if len(captions) >= expected:
             return captions[:expected], True

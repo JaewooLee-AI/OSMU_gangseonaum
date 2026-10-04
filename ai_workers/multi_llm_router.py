@@ -12,6 +12,8 @@ changes for this build:
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Optional, Tuple
 
 from core import repo
@@ -118,6 +120,28 @@ def load_vendor_config(vendor: str) -> Tuple[str, str]:
         raise RuntimeError(f"'{vendor}' 벤더의 설정이 없습니다. ⚙️ 설정 페이지에서 먼저 등록하세요.")
     api_key = decrypt_api_key(setting["encrypted_api_key"])
     return setting["model_name"], api_key
+
+
+def parse_json_object(raw: str) -> dict:
+    """The JSON object a model was asked to answer with — {} when there is none.
+
+    Every caller used to take everything from the first '{' to the *last* '}'
+    and parse that. A response with anything brace-bearing after the object —
+    a second fenced block, a trailing note — then failed with 'Extra data',
+    and the stage silently fell back (2 of ~10 proofreading calls on
+    gemini-3.8-flash in the 2026-10-04 run). This decodes exactly one object
+    starting at the first '{' and ignores what follows. A malformed object
+    still raises, as before, so callers keep treating it as a failed call
+    rather than as an empty (e.g. 'no issues found') answer.
+    """
+    cleaned = re.sub(r"```(?:json)?", "", raw or "")
+    start = cleaned.find("{")
+    if start < 0:
+        return {}
+    obj, _ = json.JSONDecoder().raw_decode(cleaned, start)
+    if not isinstance(obj, dict):
+        raise ValueError("JSON 응답이 객체가 아닙니다")
+    return obj
 
 
 def _estimate_tokens(text: str) -> int:
