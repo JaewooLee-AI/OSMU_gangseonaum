@@ -49,6 +49,7 @@ from PIL import Image
 from ai_workers.multi_llm_router import (
     GOOGLE_NO_ZERO_THINKING,
     anthropic_request_options,
+    openai_output_ceiling,
     parse_json_object,
     raise_if_refused,
     get_vision_vendor,
@@ -300,10 +301,13 @@ def _call_openai(model: str, api_key: str, images: List[bytes], max_tokens: int)
         )
     content.append({"type": "text", "text": _numbered_prompt(len(images))})
 
+    # `max_completion_tokens`, not `max_tokens`: gpt-5·gpt-6 계열은 max_tokens를 400으로 거부해,
+    # OpenAI로 사진 설명을 만들면 매번 '사진 설명 실패'로 조용히 넘어갔다(2026-10-21 실측, gpt-5-mini
+    # 포함). 추론 토큰도 같은 한도에서 빠지므로 글쓰기와 같은 여유분을 얹는다.
     res = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": content}],
-        max_tokens=max_tokens,
+        max_completion_tokens=openai_output_ceiling(model, max_tokens),
     )
     usage = getattr(res, "usage", None)
     return (
@@ -458,9 +462,12 @@ def describe_images(
         # complete items to look successful. Claude counts its thinking in
         # output_tokens, so it is measured against the ceiling actually sent
         # (with the thinking allowance), not the caption budget alone.
-        ceiling = (
-            anthropic_request_options(model_name, max_tokens)["max_tokens"] if vendor == "anthropic" else max_tokens
-        )
+        if vendor == "anthropic":
+            ceiling = anthropic_request_options(model_name, max_tokens)["max_tokens"]
+        elif vendor == "openai":
+            ceiling = openai_output_ceiling(model_name, max_tokens)
+        else:
+            ceiling = max_tokens
         truncated = used_out >= ceiling - 8
 
         repo.log_usage(

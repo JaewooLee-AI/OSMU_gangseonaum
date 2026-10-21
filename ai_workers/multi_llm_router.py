@@ -238,7 +238,15 @@ def google_client(api_key: str):
 
 
 def _is_openai_reasoning_model(model_name: str) -> bool:
-    return (model_name or "").lower().startswith(("o1", "o3", "o4", "gpt-5"))
+    # gpt-5 이후 세대(gpt-5.x, gpt-6.x …)와 o 시리즈. 2026-10-21: 'gpt-5'로 시작하는지만 보던
+    # 탓에 gpt-6 계열은 추론 여유분 없이 호출됐다.
+    return bool(re.match(r"(o\d|gpt-(?:[5-9]|\d{2,}))", (model_name or "").lower()))
+
+
+def openai_output_ceiling(model_name: str, max_tokens: int) -> int:
+    """`max_completion_tokens` to send — the caller's budget plus room for
+    hidden reasoning on reasoning models (it counts against the same ceiling)."""
+    return max_tokens + (_REASONING_HEADROOM if _is_openai_reasoning_model(model_name) else 0)
 
 
 def _call_openai(model_name, api_key, prompt, system, max_tokens):
@@ -254,9 +262,8 @@ def _call_openai(model_name, api_key, prompt, system, max_tokens):
     # the former. Reasoning models count hidden reasoning tokens against it,
     # hence the headroom for them only — for ordinary chat models the
     # caller's ceiling stays the real cost ceiling.
-    headroom = _REASONING_HEADROOM if _is_openai_reasoning_model(model_name) else 0
     res = client.chat.completions.create(
-        model=model_name, messages=messages, max_completion_tokens=max_tokens + headroom
+        model=model_name, messages=messages, max_completion_tokens=openai_output_ceiling(model_name, max_tokens)
     )
     choice = res.choices[0]
     text = choice.message.content or ""
