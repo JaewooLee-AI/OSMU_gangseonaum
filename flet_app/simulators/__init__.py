@@ -42,7 +42,7 @@ def render(channel: str, campaign: dict, is_mobile: bool = False, brand_kit: dic
     if channel == "instagram":
         return instagram.render(campaign, username=_instagram_handle(brand_kit))
     if channel == "x":
-        return x_thread.render(campaign, display_name=brand_kit.get("sub_brand") or "우렁각시 홈서비스")
+        return x_thread.render(campaign, display_name=brand_kit.get("sub_brand") or brand_kit.get("brand_name") or "공식")
     if channel == "shorts":
         return shorts.render(
             campaign,
@@ -51,15 +51,10 @@ def render(channel: str, campaign: dict, is_mobile: bool = False, brand_kit: dic
         )
     if channel == "daangn":
         areas = brand_kit.get("service_areas") or []
-        # 가사서비스 글은 우렁각시 홈서비스, 그 밖의 글은 기본 브랜드(강서나눔통합돌봄센터) 이름으로.
-        from ai_workers import post_types
-        house = post_types.voice_of(campaign.get("post_type")) == "house"
-        house_name = (brand_kit.get("house_voice") or {}).get("sub_brand") or "우렁각시 홈서비스"
+        # 프로필 이름은 글에 연결된 킷의 브랜드 — 돌봄센터 킷이면 강서나눔통합돌봄센터, 가사서비스 킷이면 우렁각시 홈서비스.
         return daangn.render(
             campaign,
-            profile_name=house_name if house else (
-                brand_kit.get("sub_brand") or brand_kit.get("brand_name") or "비즈프로필"
-            ),
+            profile_name=brand_kit.get("sub_brand") or brand_kit.get("brand_name") or "비즈프로필",
             area=areas[0] if areas else "",
         )
     raise ValueError(f"Unknown channel: {channel}")

@@ -1,5 +1,5 @@
-"""4개 탭 전부(LLM 벤더 / 네이버 API / 이미지 분석 /
-사용량), 그리고 새로 추가된 글자 크기 조정 기능.
+"""탭 전부(LLM 벤더 / 네이버 API / 이미지 분석 / 사용량·AI 비용 / 데이터 옮기기),
+그리고 글자 크기 조정 기능.
 
 네이버 API 탭의 키워드 갱신 마법사는 4단계 상태머신인데, 그 상태(`stage`,
 `candidates`, `scored`, `proposal`)는 원래부터 `core.repo.get_app_state`/
@@ -24,8 +24,9 @@ import flet as ft
 
 from ai_workers import keyword_curator, keyword_research, vision
 from ai_workers.multi_llm_router import VENDORS, test_connection, vision_capable_vendors
-from core import repo
+from core import repo, transfer
 from core.crypto_utils import decrypt_api_key, encrypt_api_key
+from core.db import DATA_DIR
 
 from flet_app.state import FONT_SCALE_STATE_KEY, AppState
 from flet_app.theme import BRAND_COLORS, MAX_FONT_SCALE, MIN_FONT_SCALE, fs, stat_card
@@ -172,7 +173,7 @@ def _vendor_card(page: ft.Page, vendor_key: str, spec: dict, default_status: ft.
     delete_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, visible=bool(saved))
 
     def _refresh_default_status() -> None:
-        current = repo.get_brand_kit().get("default_generation_vendor")
+        current = repo.get_app_settings().get("default_generation_vendor")
         setting = repo.get_llm_setting(current) if current else None
         if current and setting and setting.get("is_active"):
             cur_spec = VENDORS[current]
@@ -221,7 +222,7 @@ def _vendor_card(page: ft.Page, vendor_key: str, spec: dict, default_status: ft.
                 # 연결이 확인된 벤더를 그 자리에서 바로 기본 생성 모델로 지정합니다 —
                 # 등록과 "기본으로 지정"이 별개 단계이면 소상공인 고객이 두 번째 단계를
                 # 빠뜨리고 글쓰기 시점에야 원인을 알기 어려운 오류를 봅니다.
-                repo.save_brand_kit(default_generation_vendor=vendor_key)
+                repo.save_app_settings(default_generation_vendor=vendor_key)
 
                 saved = repo.get_llm_setting(vendor_key)
                 badge.value = _saved_badge(saved["encrypted_api_key"], saved.get("updated_at"))
@@ -246,12 +247,12 @@ def _vendor_card(page: ft.Page, vendor_key: str, spec: dict, default_status: ft.
 
     def on_delete(e: ft.Event) -> None:
         repo.delete_llm_setting(vendor_key)
-        if repo.get_brand_kit().get("default_generation_vendor") == vendor_key:
+        if repo.get_app_settings().get("default_generation_vendor") == vendor_key:
             remaining = [
                 k for k in VENDORS
                 if k != vendor_key and (repo.get_llm_setting(k) or {}).get("is_active")
             ]
-            repo.save_brand_kit(default_generation_vendor=remaining[0] if remaining else None)
+            repo.save_app_settings(default_generation_vendor=remaining[0] if remaining else None)
 
         nonlocal saved
         saved = None
@@ -294,7 +295,7 @@ def _vendor_card(page: ft.Page, vendor_key: str, spec: dict, default_status: ft.
 def _build_llm_tab(page: ft.Page, scale: float) -> ft.Control:
     default_status = ft.Text("", size=fs(13, scale))
 
-    current = repo.get_brand_kit().get("default_generation_vendor")
+    current = repo.get_app_settings().get("default_generation_vendor")
     setting = repo.get_llm_setting(current) if current else None
     if current and setting and setting.get("is_active"):
         cur_spec = VENDORS[current]
@@ -601,11 +602,15 @@ def _build_searchad_section(page: ft.Page, scale: float, rebuild) -> ft.Control:
     )
 
 
-def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adder: bool = True) -> ft.Control:
+def _build_sweep_wizard(
+    page: ft.Page, scale: float, rebuild, kit_id: int | None = None, show_category_adder: bool = True,
+) -> ft.Control:
+    # 진행 상태도 킷마다 따로 — 한 킷의 작업을 하다 다른 킷으로 바꿔도 서로 덮지 않습니다.
+    sweep_key = repo.kit_state_key("sweep", kit_id)
     naver_saved = repo.get_naver_api_settings()
     ad_saved = repo.get_searchad_settings()
     keys_ok = bool(naver_saved and ad_saved)
-    pool = repo.get_brand_kit().get("seo_keywords") or []
+    pool = repo.get_brand_kit(kit_id).get("seo_keywords") or []
 
     controls: list[ft.Control] = []
 
@@ -680,7 +685,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
 
         def _work() -> None:
             try:
-                suggested = keyword_curator.suggest_seeds()
+                suggested = keyword_curator.suggest_seeds(kit_id=kit_id)
             except Exception as exc:  # noqa: BLE001
                 seed_error.value = f"추천 실패: {exc}"
                 seed_error.color = "#B3261E"
@@ -705,9 +710,9 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
     controls.append(ft.Row([seed_field, suggest_button]))
     controls.append(seed_error)
 
-    sweep = repo.get_app_state("sweep") or {}
+    sweep = repo.get_app_state(sweep_key) or {}
     stage = sweep.get("stage", 0)
-    age = repo.app_state_age_days("sweep")
+    age = repo.app_state_age_days(sweep_key)
     if stage and age is not None and age > 0.02:
         controls.append(ft.Text(
             f"↩️ 진행 중이던 작업을 이어서 표시합니다 ({age * 24:.0f}시간 전 중단).",
@@ -739,7 +744,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
         adv_status.update()
 
     def on_reset_sweep(e: ft.Event) -> None:
-        repo.clear_app_state("sweep")
+        repo.clear_app_state(sweep_key)
         rebuild()
 
     advanced_box = ft.Container(
@@ -796,10 +801,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
 
         def _work() -> None:
             try:
-                kit = repo.get_brand_kit()
-                areas = list(kit.get("service_areas") or []) + list(
-                    (kit.get("house_voice") or {}).get("service_areas") or []
-                )
+                areas = list(repo.get_brand_kit(kit_id).get("service_areas") or [])
                 found = keyword_research.sweep_candidates(
                     seeds, min_volume=min_v, max_volume=max_v, local_areas=areas,
                 )
@@ -810,7 +812,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                 find_status.update()
                 find_button.update()
                 return
-            repo.set_app_state("sweep", {"stage": 1, "candidates": found})
+            repo.set_app_state(sweep_key, {"stage": 1, "candidates": found})
             rebuild()
 
         page.run_thread(_work)
@@ -858,7 +860,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                         find_status.update()
                         score_button.update()
                         return
-                    repo.set_app_state("sweep", {"stage": 2, "candidates": candidates, "scored": scored})
+                    repo.set_app_state(sweep_key, {"stage": 2, "candidates": candidates, "scored": scored})
                     rebuild()
 
                 page.run_thread(_work)
@@ -889,7 +891,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
 
             def _work() -> None:
                 try:
-                    result = keyword_curator.propose(scored, current=pool)
+                    result = keyword_curator.propose(scored, current=pool, kit_id=kit_id)
                 except Exception as exc:  # noqa: BLE001
                     propose_status.value = f"❌ {exc}"
                     propose_status.color = "#B3261E"
@@ -897,7 +899,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                     propose_status.update()
                     propose_button.update()
                     return
-                repo.set_app_state("sweep", {**sweep, "stage": 3, "proposal": result})
+                repo.set_app_state(sweep_key, {**sweep, "stage": 3, "proposal": result})
                 rebuild()
 
             page.run_thread(_work)
@@ -1010,8 +1012,8 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
 
                 def _work() -> None:
                     try:
-                        applied = keyword_curator.apply_and_measure(final, proposal)
-                        repo.clear_app_state("sweep")
+                        applied = keyword_curator.apply_and_measure(final, proposal, kit_id)
+                        repo.clear_app_state(sweep_key)
                         apply_status.value = (
                             f"✅ SEO 키워드 {applied['pool']}개로 갱신하고 측정까지 마쳤습니다 "
                             f"(호출 {applied['calls']}회)."
@@ -1029,7 +1031,7 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
                 page.run_thread(_work)
 
             def on_discard(e: ft.Event) -> None:
-                repo.clear_app_state("sweep")
+                repo.clear_app_state(sweep_key)
                 rebuild()
 
             controls.append(ft.Text(
@@ -1076,12 +1078,15 @@ def _build_sweep_wizard(page: ft.Page, scale: float, rebuild, show_category_adde
     )
     if not show_category_adder:
         return ft.Column([pick, ft.Divider(), keep], spacing=12)
-    add = _build_category_adder(page, scale, rebuild, keys_ok, pool)
+    add = _build_category_adder(page, scale, rebuild, keys_ok, pool, kit_id)
     return ft.Column([pick, ft.Divider(), add, ft.Divider(), keep], spacing=12)
 
 
-def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, pool: list[str]) -> ft.Control:
-    state = repo.get_app_state("category_sweep") or {}
+def _build_category_adder(
+    page: ft.Page, scale: float, rebuild, keys_ok: bool, pool: list[str], kit_id: int | None = None,
+) -> ft.Control:
+    cat_key = repo.kit_state_key("category_sweep", kit_id)
+    state = repo.get_app_state(cat_key) or {}
     stage = state.get("stage", 0)
     status = ft.Text("", size=fs(12, scale), color="#B3261E")
 
@@ -1116,11 +1121,11 @@ def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, p
 
         def _work() -> None:
             try:
-                found = keyword_curator.find_category_candidates(category, current=pool)
+                found = keyword_curator.find_category_candidates(category, current=pool, kit_id=kit_id)
             except Exception as exc:  # noqa: BLE001
                 _fail(find_button, exc)
                 return
-            repo.set_app_state("category_sweep", {"stage": 1, **found})
+            repo.set_app_state(cat_key, {"stage": 1, **found})
             rebuild()
 
         page.run_thread(_work)
@@ -1154,7 +1159,7 @@ def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, p
         controls.append(ft.Text(state["done"], size=fs(12, scale), color="#1B6E3C"))
 
     def on_discard(e: ft.Event) -> None:
-        repo.clear_app_state("category_sweep")
+        repo.clear_app_state(cat_key)
         rebuild()
 
     relevant = state.get("relevant")
@@ -1188,7 +1193,7 @@ def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, p
                     except Exception as exc:  # noqa: BLE001
                         _fail(score_button, exc)
                         return
-                    repo.set_app_state("category_sweep", {**state, "stage": 2, "proposal": proposal})
+                    repo.set_app_state(cat_key, {**state, "stage": 2, "proposal": proposal})
                     rebuild()
 
                 page.run_thread(_work)
@@ -1254,11 +1259,11 @@ def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, p
 
             def _work() -> None:
                 try:
-                    applied = keyword_curator.apply_and_measure(pool + added, proposal)
+                    applied = keyword_curator.apply_and_measure(pool + added, proposal, kit_id)
                 except Exception as exc:  # noqa: BLE001
                     _fail(apply_button, exc)
                     return
-                repo.set_app_state("category_sweep", {"done": (
+                repo.set_app_state(cat_key, {"done": (
                     f"✅ '{state.get('category')}' 분야 키워드 {len(added)}개({', '.join(added)})를 더했습니다 — "
                     f"SEO 키워드 총 {applied['pool']}개 (호출 {applied['calls']}회). 🧵 브랜드 킷에서 확인할 수 있습니다."
                 )})
@@ -1272,8 +1277,8 @@ def _build_category_adder(page: ft.Page, scale: float, rebuild, keys_ok: bool, p
     return ft.Column(controls, spacing=8)
 
 
-def _build_keyword_diagnostic_section(page: ft.Page, scale: float) -> ft.Control:
-    pool = repo.get_brand_kit().get("seo_keywords") or []
+def _build_keyword_diagnostic_section(page: ft.Page, scale: float, kit_id: int | None = None) -> ft.Control:
+    pool = repo.get_brand_kit(kit_id).get("seo_keywords") or []
     naver_saved = repo.get_naver_api_settings()
     result_box = ft.Container()
     status = ft.Text("", size=fs(12, scale), color="#B3261E")
@@ -1376,7 +1381,7 @@ def _naver_key_sections(page: ft.Page, scale: float, rebuild) -> ft.Control:
 
 
 def _build_vision_tab(scale: float) -> ft.Control:
-    brand_kit = repo.get_brand_kit()
+    brand_kit = repo.get_app_settings()
 
     vision_enabled = ft.Switch(
         label="이미지 분석 사용",
@@ -1427,7 +1432,7 @@ def _build_vision_tab(scale: float) -> ft.Control:
 
     def on_save(e: ft.Event) -> None:
         chosen = vendor_dropdown.value
-        repo.save_brand_kit(
+        repo.save_app_settings(
             vision_enabled=vision_enabled.value,
             vision_quality=quality_group.value,
             vision_vendor=None if chosen == default_label else chosen,
@@ -1491,19 +1496,243 @@ def _build_vision_tab(scale: float) -> ft.Control:
     )
 
 
+# 단가 입력 칸 옆에 거는 각 벤더의 공식 가격 페이지. 단가는 여기서 확인해 직접 입력합니다.
+PRICE_PAGES = {
+    "google": "https://ai.google.dev/gemini-api/docs/pricing",
+    "openai": "https://openai.com/api/pricing/",
+    "anthropic": "https://www.anthropic.com/pricing",
+}
+
+
+def _won(value: float) -> str:
+    return f"{value:,.0f}원"
+
+
+def _usd(value: float) -> str:
+    return f"${value:,.4f}" if value < 1 else f"${value:,.2f}"
+
+
+def _money_card(label: str, summary: dict, scale: float) -> ft.Control:
+    note = f"{_usd(summary['cost_usd'])} · {summary['calls']:,}회"
+    if summary["unpriced_calls"]:
+        note += f" · 단가 미등록 {summary['unpriced_calls']:,}회 제외"
+    return stat_card(label, _won(summary["cost_krw"]), note, scale=scale)
+
+
+def _parse_amount(text: str | None) -> float | None:
+    cleaned = (text or "").replace(",", "").replace("원", "").replace("$", "").strip()
+    if not cleaned:
+        return None
+    return float(cleaned)
+
+
+def _build_cost_section(scale: float, rebuild) -> list[ft.Control]:
+    """요청 3: 단가 표 · 환율 · 월 예산 · 누적 금액 · 벤더·모델별 표."""
+    rate = repo.get_usd_krw()
+    budget = repo.get_monthly_budget_krw()
+    today, month, total = repo.cost_today(), repo.cost_this_month(), repo.cost_all_time()
+    posts = repo.generated_post_count()
+    status = ft.Text("", size=fs(12, scale))
+
+    def say(msg: str, ok: bool = True) -> None:
+        status.value = msg
+        status.color = "#1B6E3C" if ok else "#B3261E"
+        status.update()
+
+    # --- 환율 · 예산 ---
+    rate_field = ft.TextField(label="환율 (1달러 = ?원)", value=f"{rate:,.0f}", width=200, dense=True)
+    budget_field = ft.TextField(
+        label="월 예산 (원, 비우면 경고 끔)", value=f"{budget:,.0f}" if budget else "", width=240, dense=True,
+    )
+
+    def on_save_rate(e: ft.Event) -> None:
+        try:
+            repo.set_usd_krw(_parse_amount(rate_field.value) or 0)
+            repo.set_monthly_budget_krw(_parse_amount(budget_field.value))
+        except ValueError as exc:
+            say(f"저장하지 못했습니다: {exc}", ok=False)
+            return
+        rebuild("✅ 환율·예산을 저장했습니다. 금액은 지금 환율로 다시 계산해 보여 줍니다(달러 금액은 그대로).")
+
+    # --- 단가 표 ---
+    prices = {(p["vendor"], p["model"]): p for p in repo.list_model_prices()}
+    rows: list[ft.Control] = []
+
+    def price_row(vendor: str, model: str) -> ft.Control:
+        price = prices.get((vendor, model))
+
+        def fmt(v):
+            return "" if v is None else f"{v:g}"
+
+        f_in = ft.TextField(label="입력 $/100만", value=fmt(price and price["input_per_mtok"]), width=130, dense=True)
+        f_out = ft.TextField(label="출력 $/100만", value=fmt(price and price["output_per_mtok"]), width=130, dense=True)
+        f_cache = ft.TextField(
+            label="캐시 입력 $/100만", value=fmt(price and price["cached_input_per_mtok"]), width=150, dense=True,
+            tooltip="비우면 캐시에서 읽은 입력도 일반 입력 단가로 계산합니다.",
+        )
+
+        def on_save(e: ft.Event) -> None:
+            try:
+                p_in, p_out = _parse_amount(f_in.value), _parse_amount(f_out.value)
+                p_cache = _parse_amount(f_cache.value)
+                if p_in is None or p_out is None:
+                    raise ValueError("입력·출력 단가를 모두 넣어주세요.")
+                filled = repo.save_model_price(vendor, model, p_in, p_out, p_cache)
+            except ValueError as exc:
+                say(f"{model}: {exc}", ok=False)
+                return
+            extra = f" 단가가 없던 지난 기록 {filled:,}건을 이 단가로 채웠습니다." if filled else ""
+            rebuild(f"✅ {model} 단가를 저장했습니다.{extra} 앞으로의 호출은 호출할 때의 단가로 계산합니다.")
+
+        def on_delete(e: ft.Event) -> None:
+            repo.delete_model_price(vendor, model)
+            rebuild(f"{model} 단가를 지웠습니다. 이미 계산된 지난 금액은 그대로입니다.")
+
+        async def on_open_pricing(e: ft.Event) -> None:
+            if vendor in PRICE_PAGES:
+                await ft.UrlLauncher().launch_url(PRICE_PAGES[vendor])
+
+        label = VENDORS.get(vendor, {}).get("label", vendor)
+        return ft.Row([
+            ft.Column([
+                ft.Text(model, weight=ft.FontWeight.BOLD, size=fs(12, scale)),
+                ft.Text(label + ("" if price else " · 단가 미등록"), size=fs(10, scale),
+                        color=BRAND_COLORS["text_muted"] if price else "#B3261E"),
+            ], spacing=0, width=220),
+            f_in, f_out, f_cache,
+            ft.FilledButton("저장", on_click=on_save),
+            *([ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="단가 지우기", on_click=on_delete)] if price else []),
+            *([ft.TextButton("공식 가격 보기", icon=ft.Icons.OPEN_IN_NEW, on_click=on_open_pricing)]
+              if vendor in PRICE_PAGES else []),
+        ], spacing=8, wrap=True)
+
+    for m in repo.usage_models():
+        rows.append(price_row(m["vendor"], m["model"]))
+    if not rows:
+        rows.append(ft.Text("아직 등록된 모델이 없습니다. 🔑 LLM 벤더 탭에서 모델을 등록하면 여기에 나옵니다.",
+                            size=fs(11, scale), color=BRAND_COLORS["text_muted"]))
+
+    new_vendor = ft.Dropdown(
+        label="벤더", width=180, dense=True, value="google",
+        options=[ft.DropdownOption(key=k, text=v["label"]) for k, v in VENDORS.items()],
+    )
+    new_model = ft.TextField(label="모델 이름 (호출 기록과 똑같이)", width=260, dense=True)
+
+    def on_add_model(e: ft.Event) -> None:
+        if not (new_model.value or "").strip():
+            say("모델 이름을 적어주세요.", ok=False)
+            return
+        rows.insert(len(rows), price_row(new_vendor.value, new_model.value.strip()))
+        price_box.controls = list(rows)
+        price_box.update()
+        say("아래 줄에 단가를 넣고 [저장]을 누르세요.")
+
+    price_box = ft.Column(list(rows), spacing=6)
+
+    # --- 벤더·모델별 표 ---
+    by_model = repo.cost_by_model()
+    if by_model:
+        model_table: ft.Control = ft.DataTable(
+            columns=[ft.DataColumn(ft.Text(c)) for c in ("벤더", "모델", "호출 수", "입력 토큰", "캐시 입력", "출력 토큰", "금액")],
+            rows=[
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(VENDORS.get(r["vendor"] or "", {}).get("label", r["vendor"] or "-"))),
+                    ft.DataCell(ft.Text(r["model"] or "-")),
+                    ft.DataCell(ft.Text(f"{r['calls']:,}")),
+                    ft.DataCell(ft.Text(f"{r['input_tokens']:,}")),
+                    ft.DataCell(ft.Text(f"{r['cached_input_tokens']:,}")),
+                    ft.DataCell(ft.Text(f"{r['output_tokens']:,}")),
+                    ft.DataCell(ft.Text(
+                        ("단가 미등록" if r["unpriced_calls"] == r["calls"] else
+                         f"{_won(r['cost_krw'])} ({_usd(r['cost_usd'])})"
+                         + (f" · 미등록 {r['unpriced_calls']}회" if r["unpriced_calls"] else "")),
+                        color="#B3261E" if r["unpriced_calls"] else None,
+                    )),
+                ])
+                for r in by_model
+            ],
+        )
+    else:
+        model_table = ft.Text("아직 호출 기록이 없습니다.", color=BRAND_COLORS["text_muted"])
+
+    avg = (total["cost_krw"] / posts) if posts else 0
+    budget_msg = repo.budget_message()
+    controls: list[ft.Control] = [
+        ft.Text("💰 AI 사용 금액 (추정)", weight=ft.FontWeight.BOLD, size=fs(16, scale)),
+        ft.Container(
+            content=ft.Text(
+                "예산 참고용 추정값입니다 — 등록한 단가와 환율로 계산합니다. 실제 청구 금액은 각 벤더 콘솔에서 확인하세요. "
+                "단가가 등록되지 않은 모델의 호출은 0원이 아니라 '단가 미등록'으로 따로 셉니다. "
+                "캐시 입력 단가를 비워 두면 캐시에서 읽은 입력도 일반 입력 단가로 계산합니다.",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+            ),
+            bgcolor="#F3F1EC", padding=10, border_radius=8,
+        ),
+    ]
+    if budget_msg:
+        controls.append(ft.Container(
+            content=ft.Text(budget_msg, size=fs(12, scale), color="#8A6D3B"),
+            bgcolor="#FFF6E5", padding=10, border_radius=8,
+        ))
+    budget_note = ""
+    if budget:
+        used = repo.budget_status()
+        budget_note = f"월 예산 {_won(budget)} 중 {used['ratio'] * 100:.0f}% 사용"
+    controls += [
+        ft.Row([
+            _money_card("오늘", today, scale),
+            _money_card("이번 달", month, scale),
+            _money_card("전체 누적", total, scale),
+            stat_card("글 1건당 평균", _won(avg) if posts else "-", f"생성 완료된 글 {posts:,}건 기준", scale=scale),
+        ], spacing=12, wrap=True),
+        *([ft.Text(budget_note, size=fs(12, scale))] if budget_note else []),
+        ft.Row([rate_field, budget_field, ft.FilledButton("환율·예산 저장", on_click=on_save_rate)], spacing=8, wrap=True),
+        ft.Text(f"환율 기본값은 {repo.DEFAULT_USD_KRW:,.0f}원입니다 — 실제 환율로 고쳐 쓰세요. 월 예산의 "
+                f"{'%·'.join(str(x) for x in repo.BUDGET_WARN_LEVELS)}%에 이르면 대시보드·워크벤치에 안내합니다(생성을 막지는 않음).",
+                size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+        status,
+        ft.Divider(),
+        ft.Text("단가 표 (100만 토큰당 USD)", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+        ft.Text("단가는 자주 바뀌므로 기본값을 넣어 두지 않았습니다. [공식 가격 보기]에서 확인해 넣으세요. "
+                "이미지 분석도 입력 토큰으로 계산합니다. 처음 단가를 넣으면 그 모델의 지난 기록(금액 없음)을 이 단가로 한 번 채웁니다.",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+        price_box,
+        ft.Row([new_vendor, new_model, ft.OutlinedButton("모델 줄 추가", on_click=on_add_model)], spacing=8, wrap=True),
+        ft.Divider(),
+        ft.Text("벤더·모델별 사용량", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+        ft.Column([model_table], scroll=ft.ScrollMode.AUTO),
+        ft.Divider(),
+    ]
+    return controls
+
+
 def _build_usage_tab(scale: float) -> ft.Control:
+    root = ft.Container()
+
+    def rebuild(message: str | None = None) -> None:
+        root.content = _usage_tab_body(scale, rebuild, message)
+        root.update()
+
+    root.content = _usage_tab_body(scale, rebuild, None)
+    return root
+
+
+def _usage_tab_body(scale: float, rebuild, message: str | None) -> ft.Control:
     totals = repo.usage_totals()
     spent = totals["input_tokens"] + totals["output_tokens"]
     saved = totals["saved_tokens"]
+    saved_money = repo.cost_all_time()["saved_cost_krw"]
 
     stats = ft.Row(
         [
             stat_card("총 입력 토큰", f"{totals['input_tokens']:,}", scale=scale),
             stat_card("총 출력 토큰", f"{totals['output_tokens']:,}", scale=scale),
-            stat_card("절약된 토큰", f"{saved:,}", "캐시 적중 + 해상도 축소 + 배치", scale=scale),
+            stat_card("절약된 토큰", f"{saved:,}",
+                      "캐시 적중 + 해상도 축소 + 배치" + (f" · 약 {_won(saved_money)}(추정)" if saved_money else ""),
+                      scale=scale),
             stat_card("캐시 적중", f"{totals['cache_hits']:,}", f"분석한 사진 {totals['images']:,}장", scale=scale),
         ],
-        spacing=12,
+        spacing=12, wrap=True,
     )
 
     progress_section: list[ft.Control] = []
@@ -1515,13 +1744,21 @@ def _build_usage_tab(scale: float) -> ft.Control:
         ]
 
     recent = repo.recent_usage(50)
+    rate = repo.get_usd_krw()
     if recent:
-        columns = ["시각", "종류", "벤더", "모델", "사진", "입력", "출력", "절약", "메모"]
-        keys = ["ts", "kind", "vendor", "model", "image_count", "est_input_tokens", "est_output_tokens", "est_saved_tokens", "note"]
+        columns = ["시각", "종류", "벤더", "모델", "사진", "입력", "캐시", "출력", "절약", "금액", "메모"]
+        def cell(row, k):
+            if k == "cost":
+                if row.get("cost_usd") is None:
+                    return "단가 미등록" if (row.get("est_input_tokens") or row.get("est_output_tokens")) else ""
+                return _won(row["cost_usd"] * rate)
+            return str(row.get(k) or "")
+        keys = ["ts", "kind", "vendor", "model", "image_count", "est_input_tokens", "cached_input_tokens",
+                "est_output_tokens", "est_saved_tokens", "cost", "note"]
         usage_table = ft.DataTable(
             columns=[ft.DataColumn(ft.Text(c)) for c in columns],
             rows=[
-                ft.DataRow(cells=[ft.DataCell(ft.Text(str(row.get(k) or ""))) for k in keys])
+                ft.DataRow(cells=[ft.DataCell(ft.Text(cell(row, k))) for k in keys])
                 for row in recent
             ],
         )
@@ -1529,13 +1766,20 @@ def _build_usage_tab(scale: float) -> ft.Control:
     else:
         usage_section = ft.Text("아직 호출 기록이 없습니다.", color=BRAND_COLORS["text_muted"])
 
+    cost_controls = _build_cost_section(scale, rebuild)
+    if message:
+        cost_controls.insert(1, ft.Text(message, size=fs(12, scale), color="#1B6E3C"))
+
     return ft.Column(
         [
+            *cost_controls,
+            ft.Text("📈 토큰 사용량", weight=ft.FontWeight.BOLD, size=fs(16, scale)),
             stats,
             *progress_section,
             ft.Text(
-                "입력/출력 토큰은 각 프로바이더가 응답에 실어 보낸 실제 usage 값입니다. "
-                "절약분은 저장된 사진을 축소·캐시·배치 없이 그대로 보냈을 때와의 차이입니다.",
+                "입력/출력 토큰은 각 프로바이더가 응답에 실어 보낸 실제 usage 값입니다(응답에 없으면 글자 수로 추정). "
+                "캐시는 입력 토큰 중 프롬프트 캐시에서 읽은 양으로, 이 기능을 넣은 뒤의 기록부터 따로 셉니다. "
+                "절약분은 저장된 사진을 축소·캐시·배치 없이 그대로 보냈을 때와의 차이(추정)입니다.",
                 size=fs(11, scale),
                 color=BRAND_COLORS["text_muted"],
             ),
@@ -1549,6 +1793,153 @@ def _build_usage_tab(scale: float) -> ft.Control:
     )
 
 
+def _build_transfer_tab(page: ft.Page, scale: float) -> ft.Control:
+    """📦 데이터 옮기기 — 한 PC에서 세팅한 브랜드 킷·회사 설정·API 키·AI 단가·키워드 측정값·제목 이력을
+    파일로 다른 PC에 옮긴다(core/transfer.py). 받는 PC의 글·사진·게시 기록·네이버 로그인은 건드리지 않는다."""
+    local = transfer.summary_of_local()
+    export_checks = {
+        key: ft.Checkbox(
+            label=f"{label}\n    이 PC: {local[key]}",
+            value=not (key == "api_keys" and local[key].startswith("(")),  # 키가 없으면 기본 해제
+        )
+        for key, label in transfer.PARTS.items()
+    }
+    export_pw = ft.TextField(label=f"비밀번호 (API 키를 내보낼 때 필수, {transfer.MIN_PASSWORD_LENGTH}자 이상)",
+                             password=True, can_reveal_password=True, width=420)
+    export_pw2 = ft.TextField(label="비밀번호 확인", password=True, can_reveal_password=True, width=420)
+    export_status = ft.Text("", size=fs(12, scale))
+
+    def _show(text: ft.Text, message: str, ok: bool) -> None:
+        text.value, text.color = message, ("#1B6E3C" if ok else "#B3261E")
+        text.update()
+
+    async def on_export(e: ft.Event) -> None:
+        parts = [k for k, cb in export_checks.items() if cb.value]
+        if "api_keys" in parts and (export_pw.value or "") != (export_pw2.value or ""):
+            _show(export_status, "비밀번호와 확인이 다릅니다.", False)
+            return
+        try:
+            data = transfer.export_bundle(parts, export_pw.value or None)
+        except transfer.TransferError as exc:
+            _show(export_status, f"❌ {exc}", False)
+            return
+        path = await ft.FilePicker().save_file(
+            dialog_title="OSMU 데이터 내보내기", file_name=transfer.default_file_name(),
+            file_type=ft.FilePickerFileType.CUSTOM, allowed_extensions=[transfer.FILE_EXTENSION],
+        )
+        if not path:
+            return
+        if not path.endswith("." + transfer.FILE_EXTENSION):
+            path += "." + transfer.FILE_EXTENSION
+        try:
+            with open(path, "wb") as fh:
+                fh.write(data)
+        except OSError as exc:
+            _show(export_status, f"❌ 저장하지 못했습니다: {exc}", False)
+            return
+        _show(export_status, f"✅ 저장했습니다: {path}", True)
+
+    import_state: dict = {}
+    import_info = ft.Text("", size=fs(12, scale))
+    import_checks = {key: ft.Checkbox(label=label, value=True, visible=False) for key, label in transfer.PARTS.items()}
+    import_pw = ft.TextField(label="내보낼 때 정한 비밀번호 (API 키를 가져올 때)", password=True,
+                             can_reveal_password=True, width=420, visible=False)
+    import_status = ft.Text("", size=fs(12, scale), selectable=True)
+    import_button = ft.FilledButton("📥 이 PC에 가져오기", disabled=True)
+
+    async def on_pick(e: ft.Event) -> None:
+        files = await ft.FilePicker().pick_files(
+            dialog_title="OSMU 데이터 파일 열기", with_data=True,
+            file_type=ft.FilePickerFileType.CUSTOM, allowed_extensions=[transfer.FILE_EXTENSION],
+        )
+        if not files:
+            return
+        raw = files[0].bytes
+        if raw is None and getattr(files[0], "path", None):
+            with open(files[0].path, "rb") as fh:
+                raw = fh.read()
+        try:
+            bundle = transfer.read_bundle(raw or b"")
+        except transfer.TransferError as exc:
+            import_info.value, import_info.color = f"❌ {exc}", "#B3261E"
+            import_button.disabled = True
+            for cb in import_checks.values():
+                cb.visible = False
+            import_pw.visible = False
+            page.update()
+            return
+        import_state["raw"] = raw
+        parts = set(bundle.get("parts") or [])
+        preview = transfer.preview_bundle(bundle)
+        for key, cb in import_checks.items():
+            cb.visible = key in parts
+            cb.value = key in parts
+            cb.label = f"{transfer.PARTS[key]}\n    → {preview.get(key, '')}"
+        import_pw.visible = "api_keys" in parts
+        import_info.value = f"📄 {files[0].name} · 만든 시각 {bundle.get('created_at', '-')}"
+        import_info.color = BRAND_COLORS["text"]
+        import_button.disabled = False
+        import_status.value = ""
+        page.update()
+
+    def on_import(e: ft.Event) -> None:
+        parts = [k for k, cb in import_checks.items() if cb.visible and cb.value]
+        try:
+            result = transfer.import_bundle(import_state.get("raw") or b"", parts, import_pw.value or None)
+        except transfer.TransferError as exc:
+            _show(import_status, f"❌ {exc}", False)
+            return
+        backup = result.pop("backup", None)
+        lines = ["✅ " + " / ".join(result.values())]
+        if backup:
+            lines.append(f"가져오기 전 DB를 복사해 두었습니다: {backup}")
+        lines.append("다른 메뉴로 갔다 오면 바뀐 값이 보입니다.")
+        _show(import_status, "\n".join(lines), True)
+
+    import_button.on_click = on_import
+
+    return ft.Column(
+        [
+            ft.Text(
+                "담당자가 여러 명일 때, 한 PC에서 세팅한 내용을 파일 하나로 다른 PC에 옮깁니다. 가져와도 받는 PC의 "
+                "글·사진·게시 기록·네이버 로그인은 바뀌지 않습니다. 브랜드 킷을 점검한 뒤 담당자에게 나눠 줄 때도 씁니다.",
+                size=fs(12, scale), color=BRAND_COLORS["text_muted"],
+            ),
+            ft.Text(f"옮기지 않는 것: {transfer.NOT_TRANSFERRED}.", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+            ft.Text("📤 내보내기 (기준 PC)", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+            *export_checks.values(),
+            ft.Row([export_pw, export_pw2], wrap=True),
+            _warn_box(
+                "API 키는 이 비밀번호로 암호화되어 파일에 들어갑니다. 파일과 비밀번호를 모두 가진 사람은 키를 쓸 수 있으니, "
+                "비밀번호는 파일과 다른 경로(전화·대면 등)로 알려 주세요. 브랜드 킷·회사 설정은 암호화하지 않습니다.", scale,
+            ),
+            ft.FilledButton("📤 파일로 내보내기", on_click=on_export),
+            export_status,
+            ft.Divider(),
+            ft.Text("📥 가져오기 (받는 PC)", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+            ft.Text(
+                "돌봄센터·가사서비스 킷은 이름을 바꿨어도 같은 킷끼리, 그 밖의 킷은 이름으로 맞춥니다 — 같은 킷은 내용을 "
+                "바꾸고, 없는 킷은 새로 만듭니다. 이 PC에만 있는 킷은 그대로 둡니다. 가져오기 직전의 DB는 데이터 폴더의 "
+                "backups에 복사해 둡니다(최근 5개).",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+            ),
+            ft.OutlinedButton("📂 .osmu 파일 열기", on_click=on_pick),
+            import_info,
+            *import_checks.values(),
+            import_pw,
+            import_button,
+            import_status,
+            ft.Divider(),
+            ft.Text(
+                "PC를 통째로 바꿀 때(글·사진까지 전부 옮길 때)는 이 기능 대신 앱을 닫고 데이터 폴더 "
+                f"({DATA_DIR}) 전체를 새 PC의 같은 자리에 복사하세요.",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"], selectable=True,
+            ),
+        ],
+        spacing=8, scroll=ft.ScrollMode.AUTO, expand=True,
+    )
+
+
 def build(page: ft.Page, state: AppState) -> ft.Control:
     scale = state.font_scale
     return ft.Column(
@@ -1556,7 +1947,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             ft.Text("설정 · 토큰", size=fs(24, scale), weight=ft.FontWeight.BOLD),
             _build_font_scale_section(state, scale),
             ft.Tabs(
-                length=4,
+                length=5,
                 expand=True,
                 content=ft.Column(
                     expand=True,
@@ -1566,7 +1957,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                                 ft.Tab(label="🔑 LLM 벤더"),
                                 ft.Tab(label="🔍 네이버 API"),
                                 ft.Tab(label="🖼️ 이미지 분석 (토큰)"),
-                                ft.Tab(label="📈 사용량"),
+                                ft.Tab(label="📈 사용량 · AI 비용"),
+                                ft.Tab(label="📦 데이터 옮기기"),
                             ]
                         ),
                         ft.TabBarView(
@@ -1576,6 +1968,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                                 ft.Container(content=_build_naver_tab(page, scale), padding=10),
                                 ft.Container(content=_build_vision_tab(scale), padding=10),
                                 ft.Container(content=_build_usage_tab(scale), padding=10),
+                                ft.Container(content=_build_transfer_tab(page, scale), padding=10),
                             ],
                         ),
                     ],

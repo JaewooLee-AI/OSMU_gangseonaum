@@ -7,6 +7,9 @@ API 키를 넣는 '설정'과 무엇을 노릴지 정하는 '전략'이 한 탭�
 
 새로 더한 것은 📍 동네 키워드 찾기 하나입니다 — 블로그 이력이 거의 없는 지금은
 '가사도우미' 같은 큰 검색어를 이길 수 없고, 이길 수 있는 것은 동네 단위 검색어입니다.
+
+모든 작업은 화면 위에서 고른 **대상 킷**(돌봄센터 / 가사서비스)의 SEO 키워드에만 반영됩니다.
+키워드 측정값 캐시는 킷끼리 함께 써서, 같은 키워드를 두 킷에서 써도 호출이 두 번 나가지 않습니다.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import flet as ft
 from ai_workers import keyword_curator, keyword_research
 from core import repo
 
+from flet_app.kit_picker import kit_dropdown
 from flet_app.state import AppState
 from flet_app.theme import BRAND_COLORS, fs
 from flet_app.views.settings_view import (
@@ -31,12 +35,24 @@ from flet_app.views.settings_view import (
 SHOW_CATEGORY_ADDER = False
 
 
-def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
-    kit = repo.get_brand_kit()
+# 이 화면에서 마지막으로 고른 대상 킷. 화면을 다시 열어도 같은 킷에서 이어가게 합니다.
+_KEYWORD_KIT_STATE_KEY = "seo_keyword_kit"
+
+
+def _initial_kit_id() -> int | None:
+    saved = (repo.get_app_state(_KEYWORD_KIT_STATE_KEY) or {}).get("kit_id")
+    active = {k["id"] for k in repo.list_brand_kits()}
+    return saved if saved in active else repo.default_brand_kit_id()
+
+
+def _build_local_finder(page: ft.Page, scale: float, rebuild, kit_id: int | None) -> ft.Control:
+    kit = repo.get_brand_kit(kit_id)
     pool = kit.get("seo_keywords") or []
     areas = kit.get("service_areas") or []
     keys_ok = bool(repo.get_searchad_settings())
-    state = repo.get_app_state("local_sweep") or {}
+    sweep_key = repo.kit_state_key("local_sweep", kit_id)
+    done_key = repo.kit_state_key("local_sweep_done", kit_id)
+    state = repo.get_app_state(sweep_key) or {}
 
     areas_field = ft.TextField(
         label="동네 (쉼표로 구분)", value=", ".join(state.get("areas") or areas), expand=True,
@@ -44,7 +60,7 @@ def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
     )
     services_field = ft.TextField(
         label="서비스어 (쉼표로 구분)",
-        value=", ".join(state.get("services") or keyword_research.DEFAULT_LOCAL_SERVICE_TERMS),
+        value=", ".join(state.get("services") or keyword_research.local_service_terms(kit.get("kit_key"))),
         expand=True,
         helper="동네 이름 뒤에 붙여 검색하는 말. 제공하지 않는 서비스(입주청소 등)는 넣지 마세요.",
     )
@@ -75,7 +91,7 @@ def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
                 status.update()
                 measure_button.update()
                 return
-            repo.set_app_state("local_sweep", {"areas": area_list, "services": service_list, "rows": rows})
+            repo.set_app_state(sweep_key, {"areas": area_list, "services": service_list, "rows": rows})
             rebuild()
 
         page.run_thread(_work)
@@ -139,7 +155,7 @@ def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
                 def _work() -> None:
                     try:
                         proposal = {"groups": {"purchase": [{"keyword": kw} for kw in chosen]}}
-                        applied = keyword_curator.apply_and_measure(pool + chosen, proposal)
+                        applied = keyword_curator.apply_and_measure(pool + chosen, proposal, kit_id)
                     except Exception as exc:  # noqa: BLE001
                         apply_status.value = f"❌ {exc}"
                         apply_status.color = "#B3261E"
@@ -147,8 +163,8 @@ def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
                         apply_status.update()
                         apply_button.update()
                         return
-                    repo.clear_app_state("local_sweep")
-                    repo.set_app_state("local_sweep_done", {"text": (
+                    repo.clear_app_state(sweep_key)
+                    repo.set_app_state(done_key, {"text": (
                         f"✅ 동네 키워드 {len(chosen)}개({', '.join(chosen)})를 더했습니다 — SEO 키워드 총 "
                         f"{applied['pool']}개 (유료 호출 {applied['calls']}회)."
                     )})
@@ -157,13 +173,13 @@ def _build_local_finder(page: ft.Page, scale: float, rebuild) -> ft.Control:
                 page.run_thread(_work)
 
             def on_discard(e: ft.Event) -> None:
-                repo.clear_app_state("local_sweep")
+                repo.clear_app_state(sweep_key)
                 rebuild()
 
             apply_button = ft.FilledButton("✅ 고른 동네 키워드 추가", on_click=on_apply)
             controls += [ft.Row([apply_button, ft.OutlinedButton("버리기", on_click=on_discard)]), apply_status]
 
-    done = (repo.get_app_state("local_sweep_done") or {}).get("text")
+    done = (repo.get_app_state(done_key) or {}).get("text")
     if done and rows is None:
         controls.append(ft.Text(done, size=fs(12, scale), color="#1B6E3C"))
     return ft.Column(controls, spacing=8)
@@ -173,15 +189,26 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     scale = state.font_scale
     local_box = ft.Container()
     wizard_box = ft.Container()
+    diag_box = ft.Container()
+    selected = [_initial_kit_id()]
+
+    def fill() -> None:
+        local_box.content = _build_local_finder(page, scale, rebuild, selected[0])
+        wizard_box.content = _build_sweep_wizard(page, scale, rebuild, selected[0], SHOW_CATEGORY_ADDER)
+        diag_box.content = _build_keyword_diagnostic_section(page, scale, selected[0])
 
     def rebuild() -> None:
-        local_box.content = _build_local_finder(page, scale, rebuild)
-        wizard_box.content = _build_sweep_wizard(page, scale, rebuild, SHOW_CATEGORY_ADDER)
+        fill()
         local_box.update()
         wizard_box.update()
+        diag_box.update()
 
-    local_box.content = _build_local_finder(page, scale, rebuild)
-    wizard_box.content = _build_sweep_wizard(page, scale, rebuild, SHOW_CATEGORY_ADDER)
+    def on_kit(kit_id: int) -> None:
+        selected[0] = kit_id
+        repo.set_app_state(_KEYWORD_KIT_STATE_KEY, {"kit_id": kit_id})
+        rebuild()
+
+    fill()
 
     keys_missing = not (repo.get_naver_api_settings() and repo.get_searchad_settings())
     return ft.Column(
@@ -196,12 +223,20 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                 "네이버 API 키가 아직 없습니다. ⚙️ 설정 → 🔍 네이버 API에서 API HUB와 검색광고 키를 "
                 "등록하면 아래 기능이 켜집니다.", scale,
             )] if keys_missing else []),
+            ft.Row([
+                kit_dropdown(selected[0], on_kit, label="🧵 키워드 작업 대상 킷", width=320),
+                ft.Text(
+                    "아래 동네 키워드 찾기·새로 고르기·수치 유지·진단은 모두 이 킷에만 반영됩니다. 측정값 캐시는 "
+                    "킷끼리 함께 써서 같은 키워드를 두 번 사지 않습니다.",
+                    size=fs(12, scale), color=BRAND_COLORS["text_muted"], expand=True,
+                ),
+            ]),
             ft.Divider(),
             local_box,
             ft.Divider(),
             wizard_box,
             ft.Divider(),
-            _build_keyword_diagnostic_section(page, scale),
+            diag_box,
         ],
         spacing=10,
         scroll=ft.ScrollMode.AUTO,

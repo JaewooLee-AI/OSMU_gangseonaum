@@ -25,19 +25,29 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _is_packaged_app() -> bool:
+    """`flet build`으로 만든 exe(설치형·zip)로 실행 중인지.
+
+    Flet 빌드 템플릿은 실행할 때 FLET_APP_STORAGE_DATA를 넣어 주고, 소스에서
+    `python flet_app/main.py`로 띄우면 이 값이 없습니다.
+    """
+    return bool(os.environ.get("FLET_APP_STORAGE_DATA"))
+
+
 def _default_data_dir() -> Path:
     """Where data/ lives when OSMU_DATA_DIR isn't set.
 
-    A packaged desktop app's install location (e.g. Program Files) may not be
-    writable, so a fresh install needs a per-user OS data folder instead of
-    PROJECT_ROOT/data. But this repo also has a live Streamlit install whose
-    data/ already exists next to the project — for that install, switching
-    the default out from under it would make its data look like it vanished.
-    So: keep using PROJECT_ROOT/data if it's already there (existing installs
-    untouched), and only fall back to a per-user folder for a brand new one.
+    - 소스 저장소에서 실행하고 저장소 루트에 data/가 이미 있으면 그 폴더 (개발용).
+    - 그 밖에는 사용자별 폴더 (Windows `%APPDATA%\\OSMU_GANGSEONANUM`).
+
+    패키징된 앱은 PROJECT_ROOT/data를 절대 쓰지 않습니다. 설치형에서 PROJECT_ROOT는
+    `C:\\Program Files\\…\\app`(빌드가 앱 코드를 exe 옆 app 폴더에 둠)이라 쓰기가 막혀
+    있고, 재설치 때 설치 폴더를 통째로 비우므로 거기 둔 데이터는 지워집니다.
+    zip으로 배포하던 이전 버전도 app 폴더에 data/가 없어 사용자별 폴더를 썼으므로,
+    설치형으로 옮겨도 같은 데이터를 그대로 읽습니다.
     """
     existing = PROJECT_ROOT / "data"
-    if existing.exists():
+    if not _is_packaged_app() and existing.exists():
         return existing
 
     if sys.platform == "win32":
@@ -67,53 +77,34 @@ create table if not exists llm_settings (
     updated_at          text not null default (datetime('now'))
 );
 
--- Single-row brand configuration (persona/tone/facts/glossary/compliance).
-create table if not exists brand_kit (
-    id                        integer primary key check (id = 1),
-    brand_name                text,
-    sub_brand                 text,
-    industry                  text,
-    homepage                  text,
-    persona                   text,
-    tone_and_manner           text,
-    guardrail_enabled         integer not null default 1,
-    naver_blog_id             text,
-    instagram_handle          text,
-    core_facts                text not null default '[]',
-    few_shot_samples          text not null default '[]',
-    terminology               text not null default '{}',
-    seo_keywords              text not null default '[]',
-    -- keyword -> conversion weight. Keeps "how much traffic can we win" and
-    -- "what is that traffic worth to us" as separate inputs: the first is
-    -- measurable from Naver, the second only the brand knows. Absent keys
-    -- default to 1.0, so an empty map reproduces pure traffic ranking.
-    keyword_weights           text not null default '{}',
-    -- 본문에는 쓰되 제목은 맡기지 않을 키워드. 브랜드 어휘(더봄봄, 한복 새활용)가
-    -- 여기 들어갑니다 — 검색 수요가 없어 제목을 맡기면 노출을 버리는 셈이지만,
-    -- 글에는 계속 등장해야 하는 단어라 풀에서 뺄 수도 없습니다. 가중치로 누르지
-    -- 않는 이유는 가중치가 '이 유입의 사업적 가치'라는 다른 뜻이기 때문입니다.
-    non_target_keywords   text not null default '[]',
-    -- Fallback for campaigns.content_mode — see ai_workers/content_mode.py.
-    default_content_mode      text not null default 'balanced',
-    -- 서비스 지역(구·동). 동네 키워드 후보와 지역 해시태그의 재료입니다.
-    service_areas             text not null default '[]',
-    -- 🧹 서비스·이용 정보 시트의 기본값 — 워크벤치 [브랜드 킷 기본값 채우기]가 씁니다.
-    product_defaults          text not null default '{}',
-    -- 🧓 주간보호·방문요양 글(글 유형 'care')의 서비스·이용 정보 기본값.
-    care_defaults             text not null default '{}',
-    -- 가사서비스 글의 보조 화자 {sub_brand, persona, tone_and_manner, few_shot_samples, service_areas}.
-    house_voice               text not null default '{}',
+-- 회사 전체에 하나인 값. 블로그·인스타그램 계정이 하나이고, 금기어·가드레일은
+-- 표시광고법·노인장기요양보험법 기준이라 사업 분야(브랜드 킷)와 관계없이 회사 전체에 적용됩니다.
+create table if not exists company_profile (
+    id                  integer primary key check (id = 1),
+    brand_name          text,
+    homepage            text,
+    naver_blog_id       text,
+    instagram_handle    text,
+    blacklist_map       text not null default '{}',
+    guardrail_enabled   integer not null default 1,
     -- 뉴스 큐레이션에서 빼고 볼 기사 제목 단어.
-    news_exclude_terms        text not null default '[]',
-    -- 함께 생성할 보조 채널. 끈 채널은 생성 호출 자체를 하지 않습니다.
-    enabled_channels          text not null default '["instagram", "x", "shorts", "daangn"]',
-    blacklist_map             text not null default '{}',
+    news_exclude_terms  text not null default '[]',
+    updated_at          text not null default (datetime('now'))
+);
+
+-- 앱 전역 설정(⚙️ 설정 화면). 예전에는 brand_kit 한 줄에 같이 들어 있었습니다.
+create table if not exists app_settings (
+    id                        integer primary key check (id = 1),
     default_generation_vendor text,
     vision_vendor             text,
     vision_quality            text not null default 'economy',
     vision_enabled            integer not null default 1,
+    -- 함께 생성할 보조 채널. 끈 채널은 생성 호출 자체를 하지 않습니다.
+    enabled_channels          text not null default '["instagram", "x", "shorts", "daangn"]',
     updated_at                text not null default (datetime('now'))
 );
+
+__BRAND_KIT_DDL__
 
 -- One row per piece of content, from source selection through publish.
 create table if not exists campaigns (
@@ -136,6 +127,11 @@ create table if not exists campaigns (
     -- back to the default for anything it doesn't recognise, and a rejected
     -- INSERT would be a worse failure than an unknown mode.
     content_mode        text,
+    -- 이 글을 쓸 때 고른 브랜드 킷과, 그때의 킷 이름. 이름을 따로 남기는 이유는
+    -- title_history와 같습니다 — 킷을 고치거나 삭제(보관)해도 어느 킷으로 쓴 글인지
+    -- 알 수 있어야 합니다. 외래 키를 두지 않는 것도 같은 이유입니다.
+    brand_kit_id        integer,
+    brand_kit_name      text,
     -- 글 유형 키 (ai_workers/post_types.py). 화면 기본값과 주제 캘린더 추적용이며,
     -- 생성 로직은 이 값이 아니라 실제 입력(모드·시트)을 봅니다.
     post_type           text,
@@ -163,6 +159,14 @@ create table if not exists campaigns (
     publish_error       text,
     -- 게시 완료로 바뀐 시각. updated_at은 편집 때마다 바뀌어 게시 주기 계산에 못 씁니다.
     published_at        text,
+    -- 실제 네이버 글 주소(수동 입력 또는 발행 후 자동 감지). 대시보드에서 누르면 이 주소가 열립니다.
+    published_url       text,
+    -- 원고 서식 레이어 (ai_workers/formatting.py). 본문(content)은 평문 그대로 두고,
+    -- 굵게·인용구·구분선 같은 서식은 "어느 문장에 무엇을" 식으로 여기 따로 둡니다 —
+    -- 검수·SEO·교정 단계가 평문을 전제로 돌기 때문입니다.
+    content_format      text not null default '{}',
+    -- 'none' | 'minimal' | 'standard' | 'rich'; null = 킷의 design_strength.
+    design_strength     text,
     created_at          text not null default (datetime('now')),
     updated_at          text not null default (datetime('now'))
 );
@@ -290,9 +294,81 @@ create table if not exists usage_log (
     est_input_tokens    integer not null default 0,
     est_output_tokens   integer not null default 0,
     est_saved_tokens    integer not null default 0,
-    note                text
+    note                text,
+    -- 어느 글의 호출인지 (생성·수정·SNS 재생성 중일 때만; 그 밖의 호출은 비어 있음).
+    campaign_id         text,
+    -- 입력 토큰 중 캐시에서 읽은 양 (est_input_tokens에 포함된 값).
+    cached_input_tokens integer not null default 0,
+    -- 호출 시점의 단가(model_prices)로 계산한 금액. 단가가 없으면 null = '단가 미등록'.
+    -- 단가를 나중에 바꿔도 이미 계산한 금액은 바뀌지 않습니다.
+    cost_usd            real,
+    saved_cost_usd      real
+);
+
+-- 벤더·모델별 단가 (100만 토큰당 USD). 관리자가 ⚙️ 설정 → 📈 사용량에서 입력합니다.
+-- 기본값을 넣지 않습니다: 가격은 자주 바뀌고, 지어낸 값으로 계산하면 안 됩니다.
+create table if not exists model_prices (
+    vendor                  text not null,
+    model                   text not null,
+    input_per_mtok          real not null,
+    output_per_mtok         real not null,
+    -- 비우면 캐시 입력도 일반 입력 단가로 계산합니다.
+    cached_input_per_mtok   real,
+    updated_at              text not null default (datetime('now')),
+    primary key (vendor, model)
 );
 """
+
+
+# 사업 분야별 브랜드 킷. 행이 여러 개이고, 글마다 어느 킷으로 쓸지 고릅니다.
+# 삭제는 is_archived = 1(보관)로만 합니다 — 글이 킷 ID를 들고 있으므로 행을 지우면
+# 그 글이 어느 킷으로 쓰였는지 잃게 되고, 실수로 지운 킷을 되살릴 수도 없습니다.
+# 마이그레이션이 같은 정의로 새 테이블을 만들어 옮기므로 테이블 이름만 바꿔 씁니다.
+def _brand_kit_ddl(table: str) -> str:
+    return f"""
+create table if not exists {table} (
+    id                        integer primary key autoincrement,
+    name                      text not null default '기본',
+    -- 회사 자료로 만든 킷의 표시 ('care' | 'house'). 글 유형(ai_workers/post_types.py)과
+    -- 주제 캘린더가 이 값으로 킷을 찾습니다 — 담당자가 킷 이름을 바꿔도 연결이 유지되게.
+    -- 화면에서 새로 만들거나 복제한 킷은 비어 있습니다.
+    kit_key                   text,
+    sort_order                integer not null default 0,
+    is_archived               integer not null default 0,
+    -- 이 킷의 브랜드 이름(예: 강서나눔통합돌봄센터 / 우렁각시 홈서비스). 기업명은 회사 공통입니다.
+    sub_brand                 text,
+    industry                  text,
+    persona                   text,
+    tone_and_manner           text,
+    core_facts                text not null default '[]',
+    few_shot_samples          text not null default '[]',
+    terminology               text not null default '{{}}',
+    seo_keywords              text not null default '[]',
+    -- keyword -> conversion weight. Keeps "how much traffic can we win" and
+    -- "what is that traffic worth to us" as separate inputs: the first is
+    -- measurable from Naver, the second only the brand knows. Absent keys
+    -- default to 1.0, so an empty map reproduces pure traffic ranking.
+    keyword_weights           text not null default '{{}}',
+    -- 본문에는 쓰되 제목은 맡기지 않을 키워드 (예: 가사관리사 — 사람을 부르는 호칭이라
+    -- 매 글에 나오지만, 이 말로 검색하는 사람은 대개 구직자입니다).
+    non_target_keywords       text not null default '[]',
+    -- Fallback for campaigns.content_mode — see ai_workers/content_mode.py.
+    default_content_mode      text not null default 'balanced',
+    -- 서비스 지역(구·동). 동네 키워드 후보와 지역 해시태그의 재료입니다.
+    service_areas             text not null default '[]',
+    -- 🧾 서비스·이용 정보 시트의 기본값 — 워크벤치 [브랜드 킷 기본값 채우기]·글 유형이 씁니다.
+    product_defaults          text not null default '{{}}',
+    -- 원고 서식 기본값 (ai_workers/formatting.py): 템플릿 'basic' | 'info' | 'review',
+    -- 강도 'none' | 'minimal' | 'standard' | 'rich'.
+    design_template           text not null default 'basic',
+    design_strength           text not null default 'standard',
+    created_at                text not null default (datetime('now')),
+    updated_at                text not null default (datetime('now'))
+);
+"""
+
+
+SCHEMA = SCHEMA.replace("__BRAND_KIT_DDL__", _brand_kit_ddl("brand_kit"))
 
 
 def _connect() -> sqlite3.Connection:
@@ -319,11 +395,17 @@ def init_db() -> None:
         with _connect() as conn:
             conn.executescript(SCHEMA)
             _migrate(conn)
-            conn.execute(
-                "insert or ignore into brand_kit (id) values (1)"
-            )
+            conn.execute("insert or ignore into company_profile (id) values (1)")
+            conn.execute("insert or ignore into app_settings (id) values (1)")
+            # 킷이 하나도 없으면(새 설치) 빈 '기본' 킷을 만듭니다. 내용은
+            # core.brand_seed.seed_if_empty()가 채우고, 가사서비스 킷도 그때 만듭니다.
+            if conn.execute("select count(*) from brand_kit").fetchone()[0] == 0:
+                conn.execute(f"insert into brand_kit (name) values ('{DEFAULT_KIT_NAME}')")
             conn.commit()
         _initialized = True
+
+
+DEFAULT_KIT_NAME = "기본"
 
 
 # Columns added after a database was first created. `create table if not
@@ -342,28 +424,119 @@ _ADDED_COLUMNS = {
         "published_at": "text",
         "post_type": "text",
         "photo_captions": "text not null default '{}'",
+        "brand_kit_id": "integer",
+        "brand_kit_name": "text",
+        "published_url": "text",
+        "content_format": "text not null default '{}'",
+        "design_strength": "text",
     },
-    "brand_kit": {
-        "keyword_weights": "text not null default '{}'",
-        "non_target_keywords": "text not null default '[]'",
-        "default_content_mode": "text not null default 'balanced'",
-        "service_areas": "text not null default '[]'",
-        "product_defaults": "text not null default '{}'",
-        "care_defaults": "text not null default '{}'",
-        "house_voice": "text not null default '{}'",
-        "news_exclude_terms": "text not null default '[]'",
-        "enabled_channels": """text not null default '["instagram", "x", "shorts", "daangn"]'""",
+    "usage_log": {
+        "campaign_id": "text",
+        "cached_input_tokens": "integer not null default 0",
+        "cost_usd": "real",
+        "saved_cost_usd": "real",
     },
 }
+
+# 새 컬럼에 거는 인덱스는 SCHEMA에 둘 수 없습니다 — SCHEMA가 먼저 실행되는데, 예전 DB에는
+# 그 시점에 컬럼이 아직 없습니다. 컬럼을 추가한 뒤에 만듭니다.
+_ADDED_INDEXES = (
+    "create index if not exists usage_log_campaign_idx on usage_log (campaign_id)",
+    "create index if not exists usage_log_ts_idx on usage_log (ts)",
+)
+
+# 예전 한 줄짜리 brand_kit에서 회사 공통 값과 앱 설정으로 옮겨 가는 컬럼.
+_COMPANY_COLUMNS = (
+    "brand_name", "homepage", "naver_blog_id", "instagram_handle",
+    "blacklist_map", "guardrail_enabled", "news_exclude_terms",
+)
+_APP_SETTINGS_COLUMNS = (
+    "default_generation_vendor", "vision_vendor", "vision_quality", "vision_enabled",
+    "enabled_channels",
+)
+# 킷마다 다른 화면 진행 상태. 예전에는 키 하나씩이었고 지금은 "sweep:3"처럼 킷 ID가 붙습니다.
+KIT_STATE_KEYS = ("sweep", "category_sweep", "local_sweep")
+# 예전 한 줄짜리 킷을 통째로 남겨 두는 app_state 키. 새 구조의 킷에는 없는 값(가사서비스 보조
+# 화자 house_voice, 돌봄 기본값 care_defaults)을 core.brand_seed가 두 번째 킷으로 옮길 때 씁니다.
+LEGACY_KIT_STATE_KEY = "legacy_single_brand_kit"
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> list:
+    return [row["name"] for row in conn.execute(f"pragma table_info({table})")]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, columns in _ADDED_COLUMNS.items():
-        existing = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
+        existing = set(_columns(conn, table))
         for name, decl in columns.items():
             if name not in existing:
                 conn.execute(f"alter table {table} add column {name} {decl}")
                 print(f"[db] migrated: {table}.{name} 컬럼 추가")
+    for ddl in _ADDED_INDEXES:
+        conn.execute(ddl)
+    _migrate_single_brand_kit(conn)
+
+
+def _migrate_single_brand_kit(conn: sqlite3.Connection) -> None:
+    """예전 한 줄짜리 brand_kit(id = 1 고정)을 여러 킷 구조로 옮깁니다.
+
+    - 그 한 줄은 첫 킷이 되고(ID 1 유지), 기존 글은 전부 그 킷에 연결됩니다.
+    - 회사 공통 값(계정·금기어·가드레일·뉴스 제외어)은 company_profile로, 앱 설정은 app_settings로 옮깁니다.
+    - 키워드 화면 진행 상태(app_state의 "sweep" 등)는 첫 킷의 것이 됩니다.
+    - 예전 줄 전체를 app_state에 남깁니다(LEGACY_KIT_STATE_KEY) — 가사서비스 킷을 따로 만드는 일은
+      회사 자료를 아는 core.brand_seed가 합니다(apply_seed_fixes의 'kits:split').
+
+    예전 구조인지는 brand_kit에 blacklist_map 컬럼이 있는지로 판단하므로, 한 번
+    옮긴 뒤에는 아무것도 하지 않습니다. 중간에 실패하면 전부 되돌립니다.
+    """
+    old_columns = _columns(conn, "brand_kit")
+    if "blacklist_map" not in old_columns:
+        return
+
+    conn.commit()  # 앞의 alter table까지 확정하고, 아래를 한 트랜잭션으로 묶습니다.
+    try:
+        conn.execute("begin immediate")
+        old = conn.execute("select * from brand_kit order by id limit 1").fetchone()
+        old = dict(old) if old else {}
+
+        for table, names in (("company_profile", _COMPANY_COLUMNS), ("app_settings", _APP_SETTINGS_COLUMNS)):
+            values = {k: old[k] for k in names if old.get(k) is not None}
+            conn.execute(f"insert or ignore into {table} (id) values (1)")
+            if values:
+                assignments = ", ".join(f"{k} = ?" for k in values)
+                conn.execute(f"update {table} set {assignments} where id = 1", tuple(values.values()))
+
+        if old:
+            conn.execute(
+                "insert into app_state (key, value) values (?, ?) "
+                "on conflict(key) do update set value = excluded.value, updated_at = datetime('now')",
+                (LEGACY_KIT_STATE_KEY, dumps(old)),
+            )
+
+        conn.execute("drop table if exists brand_kit_new")
+        conn.execute(_brand_kit_ddl("brand_kit_new"))
+        shared = [c for c in _columns(conn, "brand_kit_new") if c in old_columns and c != "name"]
+        cols = ", ".join(shared)
+        conn.execute(f"insert into brand_kit_new ({cols}) select {cols} from brand_kit")
+        conn.execute("drop table brand_kit")
+        conn.execute("alter table brand_kit_new rename to brand_kit")
+        if conn.execute("select count(*) from brand_kit").fetchone()[0] == 0:
+            conn.execute(f"insert into brand_kit (name) values ('{DEFAULT_KIT_NAME}')")
+
+        kit = conn.execute("select id, name from brand_kit order by id limit 1").fetchone()
+        conn.execute(
+            "update campaigns set brand_kit_id = ?, brand_kit_name = ? where brand_kit_id is null",
+            (kit["id"], kit["name"]),
+        )
+        for key in KIT_STATE_KEYS:
+            conn.execute(
+                "update or ignore app_state set key = ? where key = ?", (f"{key}:{kit['id']}", key)
+            )
+        conn.execute("commit")
+    except Exception:
+        conn.execute("rollback")
+        raise
+    print("[db] migrated: 브랜드 킷을 여러 킷 구조로 옮김 (기존 킷 → 첫 킷)")
 
 
 @contextmanager

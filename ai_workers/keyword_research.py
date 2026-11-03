@@ -515,6 +515,15 @@ DEFAULT_MAX_VOLUME = 30_000
 # 돌려주므로 동네 단위 검색어는 거의 올라오지 않습니다 — 그래서 조합을 직접 만들어
 # 검색량만 무료로 잽니다(검색광고 API). 경쟁도(유료)는 담당자가 고른 것만 잽니다.
 DEFAULT_LOCAL_SERVICE_TERMS = ["가사도우미", "청소도우미", "가사서비스", "정리수납", "주간보호센터", "데이케어센터", "방문요양"]
+# 킷(kit_key)마다 동네 이름 뒤에 붙일 서비스어 — 그 사업이 실제로 제공하는 것만.
+LOCAL_SERVICE_TERMS_BY_KIT = {
+    "care": ["주간보호센터", "데이케어센터", "방문요양"],
+    "house": ["가사도우미", "청소도우미", "가사서비스", "정리수납"],
+}
+
+
+def local_service_terms(kit_key: Optional[str]) -> List[str]:
+    return list(LOCAL_SERVICE_TERMS_BY_KIT.get(kit_key or "", DEFAULT_LOCAL_SERVICE_TERMS))
 LOCAL_MIN_VOLUME = 20
 
 

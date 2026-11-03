@@ -19,9 +19,14 @@ the scope of the 「가사근로자의 고용개선 등에 관한 법률」 기�
 방문요양·주간보호 side — 노인장기요양보험법의 본인부담금 면제·할인 유인 금지와
 의료 효과 주장. See ai_workers/guardrail.py.
 
-`seed_if_empty()` runs once on first launch; after that the Brand Kit page is
-the source of truth and this file is never re-applied, so admin edits are
-never clobbered.
+브랜드 킷은 사업 분야마다 하나씩 두 개입니다 — SNS 강화의 대상인 '돌봄센터(주간보호·방문요양)'
+킷과 '가사서비스(우렁각시 홈서비스)' 킷. 화자·전화번호·서비스 지역·키워드가 사업마다 달라,
+한 킷에 섞으면 주간보호 글이 가사 번호로 끝나는 식으로 내용이 섞였습니다. 워크벤치에서 글마다
+킷을 고릅니다. 기업명·계정·금기어·가드레일은 회사 공통(company_profile)입니다.
+
+`seed_if_empty()`는 첫 실행에서 한 번만 두 킷과 회사 공통 값을 채웁니다. 그 뒤로는
+🧵 브랜드 킷 화면이 원본이며 이 파일은 다시 적용되지 않으므로, 관리자가 고친 내용을
+덮어쓰지 않습니다. 예전(킷 한 개) 설치는 apply_seed_fixes()의 'kits:split'이 한 번 두 킷으로 나눕니다.
 """
 from __future__ import annotations
 
@@ -42,9 +47,9 @@ BRAND_COLORS = {
 }
 
 BRAND_NAME = "사회적협동조합 강서나눔돌봄센터"
-# SNS 강화의 목적은 신규 사업(주간보호·방문요양)입니다 — 2026-10-03 담당자 확인. 그래서 기본 화자·
-# 브랜드는 강서나눔통합돌봄센터이고, 가사서비스(우렁각시 홈서비스)는 가사 글 유형에서만 쓰는
-# 보조 화자(HOUSE_VOICE)입니다. 가사서비스는 기존 고객 기반으로 운영되어 SNS 의존도가 낮습니다.
+# SNS 강화의 목적은 신규 사업(주간보호·방문요양)입니다 — 2026-10-03 담당자 확인. 그래서 첫(기본)
+# 킷은 강서나눔통합돌봄센터이고, 가사서비스(우렁각시 홈서비스)는 두 번째 킷입니다. 가사서비스는 기존
+# 고객 기반으로 운영되어 SNS 의존도가 낮습니다.
 SUB_BRAND = "강서나눔통합돌봄센터"
 HOMEPAGE = "https://nanum1584.com/"
 NAVER_BLOG_ID = "nanum1584"
@@ -53,6 +58,15 @@ INDUSTRY = (
     "서울 강서구 어르신 주간보호·방문요양(노인장기요양) 기관 강서나눔통합돌봄센터(케어누리 강서점)를 운영하는 "
     "돌봄기관. 같은 법인이 강서·양천 지역 정부인증 가사서비스(우렁각시 홈서비스)도 제공 "
     "(고용노동부 인증 사회적기업 · 사회적협동조합)"
+)
+# 킷마다 그 사업만 적습니다 — 업종 문구도 프롬프트에 들어가므로, 다른 사업을 함께 적으면 글에 섞입니다.
+# (INDUSTRY는 예전 한 킷 시절의 두 사업 문구로, 예전 설치를 나눌 때 비교용으로만 씁니다.)
+CARE_INDUSTRY = (
+    "서울 강서구 어르신 주간보호·방문요양(노인장기요양) 기관 강서나눔통합돌봄센터(케어누리 강서점) — "
+    "사회적협동조합 강서나눔돌봄센터(고용노동부 인증 사회적기업)가 운영"
+)
+HOUSE_INDUSTRY = (
+    "서울 강서·양천 지역 정부인증 가사서비스(청소·세탁·정리수납) 제공기관 (고용노동부 인증 사회적기업 · 사회적협동조합)"
 )
 
 HOUSE_PERSONA = (
@@ -151,7 +165,7 @@ HOUSE_FACTS = [
 # 2026-10-03 원문 확인: 국민건강보험공단 장기요양 안내(nhis.or.kr/static/html/wbda/c/wbdac02~05.html),
 # 국가법령정보센터 노인장기요양보험법 제16조·제40조, 시행령 제8조(2026.5.12 개정).
 # 공단 안내의 '재가급여 월 한도액' 표는 2020년 기준이라 넣지 않았습니다. 법·고시가 바뀌면 고치세요.
-# '[제도 정보'로 시작하는 팩트는 가사서비스 글에는 넣지 않습니다 (content_writer._brand_kit_for).
+# 제도 정보는 돌봄센터 킷에만 둡니다 — 가사서비스 글의 근거가 아닙니다.
 INFO_FACT_PREFIX = "[제도 정보"
 INFO_FACTS = [
     "[제도 정보 · 출처: 국민건강보험공단] 장기요양인정은 장기요양보험 가입자와 피부양자, 의료급여수급권자 가운데 65세 이상 노인, 또는 65세 미만이라도 치매·뇌혈관질환 등 노인성 질병이 있는 사람이 신청할 수 있으며, 본인 또는 가족·친족 등 대리인이 신청할 수 있습니다.",
@@ -165,7 +179,11 @@ INFO_FACTS = [
 ]
 INFO_TONE_RULE = "제도 정보(장기요양등급·신청 절차·본인부담률·유효기간)는 '[제도 정보]' 팩트 그대로 쓰고 출처(국민건강보험공단 등)를 밝힙니다. 등급은 공단 등급판정위원회가 정한다는 점을 분명히 하고, 센터가 대신 신청해 준다·등급을 받게 해 준다고 쓰지 않습니다. 감경·본인부담 없음은 법정 기준 그대로만 설명하고 센터 이용 혜택처럼 쓰지 않습니다."
 
+# 킷마다 법인 공통 팩트를 앞에 두고 그 사업의 팩트를 잇습니다. (CORE_FACTS는 예전 한 킷 구조의
+# 순서로, 예전 설치를 두 킷으로 나눌 때 비교용으로만 씁니다.)
 CORE_FACTS = [*COMMON_FACTS, *CARE_FACTS[1:], *INFO_FACTS, *HOUSE_FACTS]
+CARE_KIT_FACTS = [*COMMON_FACTS, *CARE_FACTS[1:], *INFO_FACTS]
+HOUSE_KIT_FACTS = [*COMMON_FACTS, *HOUSE_FACTS]
 TONE_AND_MANNER = TONE_AND_MANNER + "\n- " + INFO_TONE_RULE
 
 CARE_TERMINOLOGY = {
@@ -204,6 +222,8 @@ HOUSE_TERMINOLOGY = {
 
 # 법인 공통 → 돌봄센터(주력) → 가사서비스 순서 (핵심 팩트와 같은 이유).
 TERMINOLOGY = {**COMMON_TERMINOLOGY, **CARE_TERMINOLOGY, **HOUSE_TERMINOLOGY}
+CARE_KIT_TERMINOLOGY = {**COMMON_TERMINOLOGY, **CARE_TERMINOLOGY}
+HOUSE_KIT_TERMINOLOGY = {**COMMON_TERMINOLOGY, **HOUSE_TERMINOLOGY}
 
 SEO_KEYWORDS = [
     # 돌봄센터(주력) — 2026-10-03 검색광고 실측: 강서구 방문요양 월 290, 강서구 주간보호센터 190,
@@ -224,6 +244,14 @@ SEO_KEYWORDS = [
     "가사돌봄",
     # (가사서비스 요금·맞벌이 가사는 월 10회 = 측정 하한이라 뺐습니다.)
 ]
+CARE_SEO_KEYWORDS = SEO_KEYWORDS[:4]
+HOUSE_SEO_KEYWORDS = SEO_KEYWORDS[4:]
+CARE_KEYWORD_WEIGHTS = {k: 2.0 for k in CARE_SEO_KEYWORDS}
+
+# 예전 설치의 SEO 키워드를 두 킷으로 나눌 때 쓰는 말. 가사 쪽 말이 있고 돌봄 쪽 말이 없으면
+# 가사서비스 킷으로, 나머지(둘 다 아닌 말 포함)는 돌봄센터 킷으로 갑니다.
+HOUSE_KEYWORD_TERMS = ("가사", "청소", "정리수납", "도우미", "홈서비스", "우렁각시", "세탁", "음식조리")
+CARE_KEYWORD_TERMS = ("요양", "주간보호", "데이케어", "돌봄센터", "장기요양", "노인", "어르신", "치매", "실버", "송영")
 
 # 표시·광고의 공정화에 관한 법률 + 가사근로자법 인증 범위 + (방문요양·주간보호 글용)
 # 노인장기요양보험법·의료법 기준의 결정론적 치환 사전.
@@ -456,48 +484,74 @@ FEW_SHOT_SAMPLES: list = []
 # 주간보호 송영 지역(전단 기준). 동네 키워드·지역 해시태그의 기본 재료입니다.
 SERVICE_AREAS = ["강서구", "화곡동", "등촌동", "가양동", "마곡동", "발산동", "우장산동", "공항동", "방화동"]
 
-# 가사서비스 글(글 유형 [가사] …)에만 쓰는 보조 화자. 브랜드 킷의 house_voice에 저장되어 화면에서
-# 고칠 수 있고, 이 값은 처음 한 번 채우는 기본값입니다 (content_writer._brand_kit_for).
 HOUSE_SUB_BRAND = "우렁각시 홈서비스"
-HOUSE_VOICE = {
+
+# --- 브랜드 킷 두 개 ---------------------------------------------------------------
+# kit_key는 글 유형(ai_workers/post_types.py)·주제 캘린더가 킷을 찾는 표시입니다. 담당자가 킷
+# 이름을 바꿔도 연결이 유지됩니다.
+CARE_KIT_KEY = "care"
+HOUSE_KIT_KEY = "house"
+CARE_KIT_NAME = "돌봄센터 (주간보호·방문요양)"
+HOUSE_KIT_NAME = "가사서비스 (우렁각시 홈서비스)"
+
+CARE_KIT = {
+    "sub_brand": SUB_BRAND,
+    "industry": CARE_INDUSTRY,
+    "persona": PERSONA,
+    "tone_and_manner": TONE_AND_MANNER,
+    "core_facts": CARE_KIT_FACTS,
+    "terminology": CARE_KIT_TERMINOLOGY,
+    "seo_keywords": CARE_SEO_KEYWORDS,
+    "keyword_weights": CARE_KEYWORD_WEIGHTS,
+    "non_target_keywords": [],
+    "service_areas": SERVICE_AREAS,
+    "product_defaults": CARE_PRODUCT_DEFAULTS,
+    "few_shot_samples": FEW_SHOT_SAMPLES,
+    "default_content_mode": "balanced",
+    "design_template": "basic",
+    "design_strength": "standard",
+}
+HOUSE_KIT = {
     "sub_brand": HOUSE_SUB_BRAND,
+    "industry": HOUSE_INDUSTRY,
     "persona": HOUSE_PERSONA,
     "tone_and_manner": HOUSE_TONE,
-    "few_shot_samples": HOUSE_FEW_SHOT,
+    "core_facts": HOUSE_KIT_FACTS,
+    "terminology": HOUSE_KIT_TERMINOLOGY,
+    "seo_keywords": HOUSE_SEO_KEYWORDS,
+    "keyword_weights": {},
+    "non_target_keywords": NON_TARGET_KEYWORDS,
     "service_areas": HOUSE_SERVICE_AREAS,
+    "product_defaults": PRODUCT_DEFAULTS,
+    "few_shot_samples": HOUSE_FEW_SHOT,
+    "default_content_mode": "balanced",
+    "design_template": "basic",
+    "design_strength": "standard",
+}
+COMPANY = {
+    "brand_name": BRAND_NAME,
+    "homepage": HOMEPAGE,
+    "naver_blog_id": NAVER_BLOG_ID,
+    "instagram_handle": INSTAGRAM_HANDLE,
+    "blacklist_map": BLACKLIST_MAP,
+    "guardrail_enabled": True,
+    "news_exclude_terms": NEWS_EXCLUDE_TERMS,
 }
 
 
 def seed_if_empty() -> bool:
-    """Populates the Brand Kit on first launch only. Returns True if seeded."""
-    existing = repo.get_brand_kit()
-    if existing.get("brand_name") or existing.get("persona"):
+    """Populates the two kits and the company profile on first launch only.
+    Returns True if seeded."""
+    company = repo.get_company_profile()
+    kit = repo.get_brand_kit()
+    if company.get("brand_name") or kit.get("persona"):
         return False
 
-    repo.save_brand_kit(
-        brand_name=BRAND_NAME,
-        sub_brand=SUB_BRAND,
-        industry=INDUSTRY,
-        homepage=HOMEPAGE,
-        naver_blog_id=NAVER_BLOG_ID,
-        instagram_handle=INSTAGRAM_HANDLE,
-        persona=PERSONA,
-        tone_and_manner=TONE_AND_MANNER,
-        core_facts=CORE_FACTS,
-        terminology=TERMINOLOGY,
-        seo_keywords=SEO_KEYWORDS,
-        non_target_keywords=NON_TARGET_KEYWORDS,
-        service_areas=SERVICE_AREAS,
-        product_defaults=PRODUCT_DEFAULTS,
-        care_defaults=CARE_PRODUCT_DEFAULTS,
-        house_voice=HOUSE_VOICE,
-        news_exclude_terms=NEWS_EXCLUDE_TERMS,
-        blacklist_map=BLACKLIST_MAP,
-        few_shot_samples=FEW_SHOT_SAMPLES,
-        guardrail_enabled=True,
-        vision_enabled=True,
-        vision_quality="economy",
-    )
+    repo.save_company_profile(**COMPANY)
+    repo.save_app_settings(vision_enabled=True, vision_quality="economy")
+    repo.save_brand_kit(kit.get("id"), name=CARE_KIT_NAME, kit_key=CARE_KIT_KEY, **CARE_KIT)
+    if repo.kit_id_for_key(HOUSE_KIT_KEY) is None:
+        repo.create_brand_kit(HOUSE_KIT_NAME, values=HOUSE_KIT, kit_key=HOUSE_KIT_KEY)
     return True
 
 
@@ -513,7 +567,7 @@ _SEED_FIXES_STATE_KEY = "brand_seed_fixes_applied"
 # Same idea for the banned-term dictionary: entries added to BLACKLIST_MAP
 # after a kit was seeded. Each key is added once, and only if the admin's
 # dictionary doesn't already have it — an existing entry (with whatever
-# replacement the admin chose) always wins. Empty for a new company.
+# replacement the admin chose) always wins.
 SEED_BLACKLIST_ADDITIONS: dict = {
     "은광회복지재단": "은강회복지재단",
     "연간 70만 원": "70만 원",
@@ -524,22 +578,26 @@ SEED_BLACKLIST_ADDITIONS: dict = {
 
 
 def apply_seed_fixes() -> int:
-    """Applies SEED_FIXES to the saved tone guide and SEED_BLACKLIST_ADDITIONS
-    to the saved dictionary. Returns how many changes were made."""
+    """Applies SEED_FIXES to every kit's saved tone guide (보관된 킷 포함 — 되살렸을
+    때 예전 문구가 돌아오면 안 되므로), SEED_BLACKLIST_ADDITIONS to the shared
+    dictionary, and — once — splits an old single-kit install into the two kits.
+    Returns how many changes were made."""
     done = set((repo.get_app_state(_SEED_FIXES_STATE_KEY) or {}).get("done") or [])
-    tone = repo.get_brand_kit().get("tone_and_manner") or ""
+    pending = [(old, new) for old, new in SEED_FIXES if old not in done]
     applied = 0
-    for old, new in SEED_FIXES:
-        if old in done:
-            continue
-        if old in tone:
-            tone = tone.replace(old, new)
-            applied += 1
-        done.add(old)
-    if applied:
-        repo.save_brand_kit(tone_and_manner=tone)
+    for kit in repo.list_brand_kits(include_archived=True):
+        tone = kit.get("tone_and_manner") or ""
+        changed = 0
+        for old, new in pending:
+            if old in tone:
+                tone = tone.replace(old, new)
+                changed += 1
+        if changed:
+            repo.save_brand_kit(kit["id"], tone_and_manner=tone)
+            applied += changed
+    done.update(old for old, _ in pending)
 
-    blacklist = dict(repo.get_brand_kit().get("blacklist_map") or {})
+    blacklist = dict(repo.get_company_profile().get("blacklist_map") or {})
     added = 0
     for term, replacement in SEED_BLACKLIST_ADDITIONS.items():
         marker = f"blacklist:{term}"
@@ -550,213 +608,151 @@ def apply_seed_fixes() -> int:
             added += 1
         done.add(marker)
     if added:
-        repo.save_brand_kit(blacklist_map=blacklist)
+        repo.save_company_profile(blacklist_map=blacklist)
 
-    added += _apply_seed_field_additions(done)
-    added += _apply_care_division(done)
+    if "kits:split" not in done:
+        added += split_single_kit(done)
+        done.add("kits:split")
 
     repo.set_app_state(_SEED_FIXES_STATE_KEY, {"done": sorted(done)})
     return applied + added
 
 
-# Brand Kit fields introduced after this company's kit was first seeded. Each
-# is filled once, and only while the admin's value is still empty — a field
-# the admin has already set (or emptied on purpose after the first fill) is
-# never touched again, the same rule SEED_BLACKLIST_ADDITIONS follows.
-# 이미 시드된 브랜드 킷에 주간보호 사업 분야를 더할 때의 1회성 변경. 담당자가 손대지
-# 않은 원문 그대로일 때만 바꾸고(SEED_FIXES와 같은 원칙), 추가는 없는 항목만 넣습니다.
-SEED_FACT_REPLACEMENTS = [
-    (
-        "센터는 가사관리 외에 방문요양·장애인 활동지원·병원동행·긴급돌봄을 제공하며, 강서나눔통합돌봄센터(케어누리 강서점, 강서구 수명로2길 96 신관 2층, 02-6958-9084)에서 주간보호(월~토 08:30~18:00)와 방문요양을 운영합니다.",
-        CARE_FACTS,
-    ),
-]
-# 업종 문구 — 시드 당시 원문 그대로일 때만 주간보호를 포함한 문구로 바꿉니다.
-SEED_INDUSTRY_FIX = (
-    "서울 강서·양천 지역 정부인증 가사서비스(청소·세탁·정리수납) 제공기관 (고용노동부 인증 사회적기업 · 사회적협동조합)",
-    INDUSTRY,
-)
-SEED_KEYWORD_ADDITIONS = {
-    "강서구 방문요양": 2.0, "강서구 주간보호센터": 2.0, "화곡동 주간보호센터": 2.0, "강서구 데이케어센터": 2.0,
-}
-SEED_KEYWORD_REMOVALS = ["가사서비스 요금", "맞벌이 가사"]
-SEED_AREA_ADDITIONS = ["우장산동"]
+# --- 예전 한 킷 설치를 두 킷으로 ----------------------------------------------------------
+# 예전 구조: 킷 하나에 기본 화자(돌봄센터)와 보조 화자(house_voice = 가사서비스)가 함께 있고,
+# 팩트·용어집·키워드는 두 사업 것이 섞여 있었습니다. core/db.py가 그 한 줄을 첫 킷으로 옮기고
+# 원래 값 전체를 app_state(LEGACY_KIT_STATE_KEY)에 남겨 두면, 여기서 회사 자료를 기준으로 나눕니다.
+# 담당자가 고친 내용(키워드 작업 결과·추가한 팩트 등)은 버리지 않습니다 — 어느 사업 것인지 모르는
+# 팩트·용어는 두 킷 모두에 남깁니다.
+# 예전 키 하나 구조에서 쓰던 1회성 고침 표시. 아직 적용되지 않은 설치(아주 예전 버전에서 바로 올라온
+# 경우)만 그 내용을 돌봄센터 킷에 채웁니다.
+_LEGACY_MARKERS = ("voice:care-primary", "facts:care-division", "facts:ltc-info", "keywords:care-division",
+                   "care-defaults:care-division")
+HOUSE_POST_TYPES = ("service", "voucher", "review", "tip", "recruit")
 
 
-def _apply_care_division(done: set) -> int:
-    kit = repo.get_brand_kit()
-    changes = {}
-
-    facts = list(kit.get("core_facts") or [])
-    for old, new in SEED_FACT_REPLACEMENTS:
-        marker = "facts:care-division"
-        if marker in done:
-            continue
-        if old in facts:
-            at = facts.index(old)
-            facts[at:at + 1] = [f for f in new if f not in facts]
-            changes["core_facts"] = facts
-        done.add(marker)
-
-    if "terminology:care-division" not in done:
-        terms = dict(kit.get("terminology") or {})
-        added = {k: v for k, v in CARE_TERMINOLOGY.items() if k not in terms}
-        if added:
-            terms.update(added)
-            changes["terminology"] = terms
-        done.add("terminology:care-division")
-
-    # 데이케어센터는 주간보호 분야를 더한 뒤에 찾은 동의어라 별도 표시로 한 번 더 더합니다.
-    if "keywords:daycare-synonym" not in done:
-        pool = list(changes.get("seo_keywords") or kit.get("seo_keywords") or [])
-        weights = dict(changes.get("keyword_weights") or kit.get("keyword_weights") or {})
-        terms = dict(changes.get("terminology") or kit.get("terminology") or {})
-        if "keywords:care-division" in done and "강서구 데이케어센터" not in pool:
-            pool.append("강서구 데이케어센터")
-            weights.setdefault("강서구 데이케어센터", 2.0)
-            changes["seo_keywords"] = pool
-            changes["keyword_weights"] = weights
-        if "데이케어센터" not in terms:
-            terms["데이케어센터"] = CARE_TERMINOLOGY["데이케어센터"]
-            changes["terminology"] = terms
-        done.add("keywords:daycare-synonym")
-
-    if "keywords:care-division" not in done:
-        pool = list(kit.get("seo_keywords") or [])
-        weights = dict(kit.get("keyword_weights") or {})
-        before = list(pool)
-        pool = [k for k in pool if k not in SEED_KEYWORD_REMOVALS]
-        for keyword, weight in SEED_KEYWORD_ADDITIONS.items():
-            if keyword not in pool:
-                pool.append(keyword)
-                weights.setdefault(keyword, weight)
-        if pool != before:
-            changes["seo_keywords"] = pool
-            changes["keyword_weights"] = {k: v for k, v in weights.items() if k in pool}
-            changes["non_target_keywords"] = [k for k in (kit.get("non_target_keywords") or []) if k in pool]
-        done.add("keywords:care-division")
-
-    # 기본 화자를 주간보호로, 가사서비스는 보조 화자(house_voice)로. 지금 킷의 가사 화자는
-    # (담당자가 고친 내용 포함) 그대로 house_voice로 옮기고, 기본 화자 자리는 비어 있지 않을 때만
-    # 바꿉니다 — 서브 브랜드가 아직 '우렁각시 홈서비스'인 킷만 대상입니다.
-    if "voice:care-primary" not in done:
-        if (kit.get("sub_brand") or "").strip() == HOUSE_SUB_BRAND:
-            changes["house_voice"] = {
-                "sub_brand": kit.get("sub_brand"),
-                "persona": kit.get("persona") or HOUSE_PERSONA,
-                "tone_and_manner": kit.get("tone_and_manner") or HOUSE_TONE,
-                "few_shot_samples": kit.get("few_shot_samples") or HOUSE_FEW_SHOT,
-                "service_areas": kit.get("service_areas") or HOUSE_SERVICE_AREAS,
-            }
-            changes.update(
-                sub_brand=SUB_BRAND, persona=PERSONA, tone_and_manner=TONE_AND_MANNER,
-                few_shot_samples=FEW_SHOT_SAMPLES, service_areas=SERVICE_AREAS, industry=INDUSTRY,
-            )
-        done.add("voice:care-primary")
-
-    # 화면 통합 — 담당자가 고치지 않은(같은 항목 집합) 팩트·용어집만 새 순서로 다시 씁니다.
-    if "order:integrated" not in done:
-        facts_now = list(changes.get("core_facts") or kit.get("core_facts") or [])
-        if facts_now and set(facts_now) == set(CORE_FACTS):
-            changes["core_facts"] = list(CORE_FACTS)
-        terms_now = dict(changes.get("terminology") or kit.get("terminology") or {})
-        if terms_now and terms_now == TERMINOLOGY:
-            changes["terminology"] = dict(TERMINOLOGY)
-        done.add("order:integrated")
-
-    # [새로 고르기]의 '경쟁 과다(문서/검색 100)' 기준이 지역 키워드에 그대로 적용되던 동안(2026-10-03,
-    # keyword_curator.LOCAL_MAX_DOCS_PER_SEARCH로 수정) 빠진 돌봄 지역 키워드를 한 번 되돌립니다. 그때
-    # 들어온 키워드는 건드리지 않고, 센터 제공 여부가 확인되지 않은 '노인맞춤돌봄서비스'만 타깃에서 뺍니다.
-    if "terminology:eungang" not in done:
-        terms = dict(changes.get("terminology") or kit.get("terminology") or {})
-        if "은강회복지재단" not in terms:
-            terms["은강회복지재단"] = CARE_TERMINOLOGY["은강회복지재단"]
-            changes["terminology"] = terms
-        done.add("terminology:eungang")
-
-    if "keywords:restore-local" not in done:
-        pool = list(changes.get("seo_keywords") or kit.get("seo_keywords") or [])
-        weights = dict(changes.get("keyword_weights") or kit.get("keyword_weights") or {})
-        non_targets = list(changes.get("non_target_keywords") or kit.get("non_target_keywords") or [])
-        restored = [k for k in SEED_KEYWORD_ADDITIONS if k not in pool]
-        if restored:
-            pool = restored + pool
-            for k in restored:
-                weights.setdefault(k, SEED_KEYWORD_ADDITIONS[k])
-        if "노인맞춤돌봄서비스" in pool and "노인맞춤돌봄서비스" not in non_targets:
-            non_targets.append("노인맞춤돌봄서비스")
-        if restored or non_targets != list(kit.get("non_target_keywords") or []):
-            changes.update(seo_keywords=pool, keyword_weights=weights, non_target_keywords=non_targets)
-        done.add("keywords:restore-local")
-
-    # 장기요양 제도 정보 팩트와 화자 규칙을 한 번 더합니다 (첫 가사서비스 팩트 바로 앞에).
-    if "facts:ltc-info" not in done:
-        facts = list(changes.get("core_facts") or kit.get("core_facts") or [])
-        missing = [f for f in INFO_FACTS if f not in facts]
-        if missing:
-            at = next((i for i, f in enumerate(facts) if f in HOUSE_FACTS), len(facts))
-            facts[at:at] = missing
-            changes["core_facts"] = facts
-        tone = changes.get("tone_and_manner") or kit.get("tone_and_manner") or ""
-        if INFO_TONE_RULE not in tone:
-            changes["tone_and_manner"] = tone.rstrip() + "\n- " + INFO_TONE_RULE
-        done.add("facts:ltc-info")
-
-    if "industry:care-division" not in done:
-        old, new = SEED_INDUSTRY_FIX
-        if (kit.get("industry") or "").strip() == old and "industry" not in changes:
-            changes["industry"] = new
-        done.add("industry:care-division")
-
-    if "care-defaults:care-division" not in done:
-        if not kit.get("care_defaults"):
-            changes["care_defaults"] = CARE_PRODUCT_DEFAULTS
-        done.add("care-defaults:care-division")
-
-    if "areas:care-division" not in done:
-        areas = list(kit.get("service_areas") or [])
-        missing = [a for a in SEED_AREA_ADDITIONS if a not in areas]
-        if areas and missing and "service_areas" not in changes:
-            changes["service_areas"] = areas + missing
-        done.add("areas:care-division")
-
-    if changes:
-        repo.save_brand_kit(**changes)
-    return len(changes)
+def _is_house_keyword(keyword: str) -> bool:
+    k = keyword.replace(" ", "")
+    return any(t in k for t in HOUSE_KEYWORD_TERMS) and not any(t in k for t in CARE_KEYWORD_TERMS)
 
 
-def _seed_field_additions() -> dict:
-    return {
-        "service_areas": SERVICE_AREAS,
-        "product_defaults": PRODUCT_DEFAULTS,
-        "news_exclude_terms": NEWS_EXCLUDE_TERMS,
+def split_single_kit(done: set) -> int:
+    """예전 한 킷(house_voice가 있던 구조)을 돌봄센터 킷 + 가사서비스 킷으로 나눕니다.
+
+    새 설치(seed_if_empty가 두 킷을 만든 경우)나 이미 나눈 설치에서는 아무것도 하지 않습니다.
+    """
+    from core.db import LEGACY_KIT_STATE_KEY
+
+    legacy = repo.get_app_state(LEGACY_KIT_STATE_KEY)
+    if not isinstance(legacy, dict) or repo.kit_id_for_key(HOUSE_KIT_KEY) is not None:
+        return 0
+
+    def field(name, default):
+        from core.db import loads
+        value = legacy.get(name)
+        return loads(value, default) if isinstance(value, str) and name not in _PLAIN_FIELDS else (value if value is not None else default)
+
+    care = repo.get_brand_kit(repo.default_brand_kit_id())
+    care_id = care.get("id")
+    facts = list(field("core_facts", []))
+    terms = dict(field("terminology", {}))
+    pool = list(field("seo_keywords", []))
+    weights = dict(field("keyword_weights", {}))
+    non_targets = list(field("non_target_keywords", []))
+    voice = dict(field("house_voice", {}))
+    care_defaults = dict(field("care_defaults", {}))
+    house_defaults = dict(field("product_defaults", {}))
+
+    # 아주 예전 설치(돌봄 사업을 더하기 전)는 기본 화자가 아직 가사서비스입니다 — 그 화자를 가사 킷으로.
+    still_house_voice = (legacy.get("sub_brand") or "").strip() == HOUSE_SUB_BRAND
+    if still_house_voice:
+        voice = {
+            "sub_brand": legacy.get("sub_brand"),
+            "persona": legacy.get("persona"),
+            "tone_and_manner": legacy.get("tone_and_manner"),
+            "few_shot_samples": field("few_shot_samples", []),
+            "service_areas": field("service_areas", []),
+        }
+        house_defaults = house_defaults or PRODUCT_DEFAULTS
+
+    care_facts = [f for f in facts if f not in HOUSE_FACTS]
+    for marker, wanted in (("facts:care-division", CARE_KIT_FACTS), ("facts:ltc-info", INFO_FACTS)):
+        if marker not in done:
+            care_facts += [f for f in wanted if f not in care_facts]
+    house_facts = [f for f in facts if f not in CARE_FACTS[1:] and not str(f).startswith(INFO_FACT_PREFIX)]
+    if still_house_voice or not any(f in HOUSE_FACTS for f in house_facts):
+        house_facts += [f for f in HOUSE_KIT_FACTS if f not in house_facts]
+
+    house_only_terms = set(HOUSE_TERMINOLOGY) - set(CARE_TERMINOLOGY)
+    care_only_terms = set(CARE_TERMINOLOGY) - set(HOUSE_TERMINOLOGY)
+    care_terms = {k: v for k, v in terms.items() if k not in house_only_terms}
+    house_terms = {k: v for k, v in terms.items() if k not in care_only_terms}
+    if "keywords:care-division" not in done or still_house_voice:
+        care_terms.update({k: v for k, v in CARE_KIT_TERMINOLOGY.items() if k not in care_terms})
+
+    house_pool = [k for k in pool if _is_house_keyword(k)]
+    care_pool = [k for k in pool if k not in house_pool]
+    if "keywords:care-division" not in done or still_house_voice:
+        care_pool += [k for k in CARE_SEO_KEYWORDS if k not in care_pool]
+        for k in CARE_SEO_KEYWORDS:
+            weights.setdefault(k, CARE_KEYWORD_WEIGHTS[k])
+
+    care_values = {
+        "core_facts": care_facts,
+        "terminology": care_terms,
+        "seo_keywords": care_pool,
+        "keyword_weights": {k: v for k, v in weights.items() if k in care_pool},
+        "non_target_keywords": [k for k in non_targets if k in care_pool],
+        "product_defaults": care_defaults or CARE_PRODUCT_DEFAULTS,
     }
+    if still_house_voice:
+        care_values.update(
+            sub_brand=SUB_BRAND, persona=PERSONA, tone_and_manner=TONE_AND_MANNER,
+            few_shot_samples=FEW_SHOT_SAMPLES, service_areas=SERVICE_AREAS, industry=CARE_INDUSTRY,
+        )
+    elif (legacy.get("industry") or "").strip() in (INDUSTRY, HOUSE_INDUSTRY):
+        # 담당자가 고치지 않은 두 사업 문구면 돌봄센터 문구로 바꿉니다.
+        care_values["industry"] = CARE_INDUSTRY
+    repo.save_brand_kit(care_id, name=_free_name(CARE_KIT_NAME, care_id), kit_key=CARE_KIT_KEY, **care_values)
+
+    house_values = {
+        "sub_brand": voice.get("sub_brand") or HOUSE_SUB_BRAND,
+        "industry": HOUSE_INDUSTRY,
+        "persona": voice.get("persona") or HOUSE_PERSONA,
+        "tone_and_manner": voice.get("tone_and_manner") or HOUSE_TONE,
+        "few_shot_samples": voice.get("few_shot_samples") or HOUSE_FEW_SHOT,
+        "service_areas": voice.get("service_areas") or HOUSE_SERVICE_AREAS,
+        "core_facts": house_facts,
+        "terminology": house_terms,
+        "seo_keywords": house_pool,
+        "keyword_weights": {k: v for k, v in weights.items() if k in house_pool},
+        "non_target_keywords": [k for k in non_targets if k in house_pool],
+        "product_defaults": house_defaults or PRODUCT_DEFAULTS,
+        "default_content_mode": care.get("default_content_mode") or "balanced",
+        "design_template": "basic",
+        "design_strength": "standard",
+    }
+    house_id = repo.create_brand_kit(_free_name(HOUSE_KIT_NAME), values=house_values, kit_key=HOUSE_KIT_KEY)
+
+    # 글은 글 유형으로 킷을 정합니다 — [가사] 유형으로 쓴 글은 가사서비스 킷으로.
+    care_kit = repo.get_brand_kit(care_id)
+    house_kit = repo.get_brand_kit(house_id)
+    for campaign in repo.list_campaigns():
+        target = house_kit if campaign.get("post_type") in HOUSE_POST_TYPES else care_kit
+        repo.update_campaign(campaign["id"], brand_kit_id=target["id"], brand_kit_name=target["name"])
+
+    done.update(_LEGACY_MARKERS)
+    print(f"[brand_seed] 예전 브랜드 킷을 '{care_kit['name']}'·'{house_kit['name']}' 두 킷으로 나눴습니다.")
+    return 2
 
 
-def _apply_seed_field_additions(done: set) -> int:
-    kit = repo.get_brand_kit()
-    changes = {}
-    for field, value in _seed_field_additions().items():
-        marker = f"field:{field}"
-        if marker in done:
-            continue
-        if not kit.get(field) and value:
-            changes[field] = value
-        done.add(marker)
+# app_state에 남은 예전 줄에서 JSON이 아닌 글자 그대로의 값.
+_PLAIN_FIELDS = {"sub_brand", "persona", "tone_and_manner", "industry", "name"}
 
-    # Non-target keywords are added per keyword, and only when the keyword is
-    # in the pool — an admin who removed '가사관리사' from the pool keeps it out.
-    non_targets = list(kit.get("non_target_keywords") or [])
-    pool = kit.get("seo_keywords") or []
-    for keyword in NON_TARGET_KEYWORDS:
-        marker = f"non_target:{keyword}"
-        if marker in done:
-            continue
-        if keyword in pool and keyword not in non_targets:
-            non_targets.append(keyword)
-            changes["non_target_keywords"] = non_targets
-        done.add(marker)
 
-    if changes:
-        repo.save_brand_kit(**changes)
-    return len(changes)
+def _free_name(name: str, own_id=None) -> str:
+    """담당자가 이미 같은 이름의 킷을 만들어 두었으면 겹치지 않는 이름으로."""
+    taken = {k["name"] for k in repo.list_brand_kits() if k["id"] != own_id}
+    if name not in taken:
+        return name
+    return repo.unique_kit_name(name)

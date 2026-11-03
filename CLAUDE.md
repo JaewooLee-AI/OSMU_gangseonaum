@@ -37,6 +37,13 @@ Claude Code가 무엇을 어떻게 고치면 되는지 알려주는 작업지시
 모든 값이 `core/brand_seed.py` 한 파일에 모여 있습니다. 이 파일의 구조를 그대로 유지한 채
 **값만** 새 회사 것으로 교체하세요.
 
+**브랜드 킷은 사업 분야마다 하나씩입니다.** 지금은 `CARE_KIT`(돌봄센터 — 주간보호·방문요양)와 `HOUSE_KIT`(가사서비스 —
+우렁각시 홈서비스) 두 개이고, 각각 화자·톤·팩트·용어집·SEO 키워드·서비스 지역·기본값을 따로 가집니다. 기업명·계정·금기어·
+가드레일·뉴스 제외어는 `COMPANY`(회사 공통)입니다. 워크벤치에서 글마다 킷을 고르고, 글 유형(`ai_workers/post_types.py`의
+`kit`)과 추천 주제는 킷의 `kit_key`('care'/'house')로 연결됩니다. 사업이 하나뿐인 회사라면 킷 하나로 충분한데,
+`seed_if_empty()`가 두 번째 킷을 만들지 않게 하는 것은 코드 변경이므로 사용자에게 먼저 확인하세요. (킷 추가·복제·삭제는
+앱의 🧵 브랜드 킷 화면에서도 됩니다.)
+
 | 상수 | 무엇을 넣나 |
 |---|---|
 | `BRAND_NAME`, `SUB_BRAND` | 회사 법인명, (있다면) 브랜드/제품 라인명 |
@@ -54,7 +61,8 @@ Claude Code가 무엇을 어떻게 고치면 되는지 알려주는 작업지시
 | `SERVICE_AREAS` | 실제 서비스 지역(구·동·생활권). 📍 동네 키워드 후보와 인스타·당근 지역 표현의 재료입니다. 전국 배송 업종이면 빈 리스트로 두세요 |
 | `PRODUCT_DEFAULTS` | 🧹 서비스·이용 정보 시트의 기본값 (키: price/moq/lead_time/size/options/custom/order). **`CORE_FACTS`에 있는 내용만** 넣고 모르는 칸은 빼세요 — 이 값은 글에 '반드시 넣을 사실'로 전달됩니다 |
 | `NEWS_EXCLUDE_TERMS` | 뉴스 큐레이션에서 뺄 기사 단어 (업종 키워드로 검색하면 섞여 들어오는 논쟁적·무관한 주제) |
-| `CARE_FACTS`·`CARE_TERMINOLOGY`·`CARE_PERSONA`·`CARE_TONE_EXTRA`·`CARE_PRODUCT_DEFAULTS` | 두 번째 사업 분야(현재: 주간보호·방문요양) 값. 글 유형 'care'일 때만 화자·규칙·기본값이 바뀝니다. 새 회사에 두 번째 사업이 없으면 `CARE_FACTS`·`CARE_TERMINOLOGY`를 빈 값으로 두고 `ai_workers/post_types.py`의 'care' 유형을 빼세요 |
+| `CARE_*`·`HOUSE_*` (`CARE_FACTS`·`HOUSE_FACTS`·`CARE_TERMINOLOGY`·`HOUSE_TERMINOLOGY`·`HOUSE_PERSONA`·`HOUSE_TONE`·`CARE_PRODUCT_DEFAULTS`·`CARE_SEO_KEYWORDS`·`HOUSE_SEO_KEYWORDS`·`CARE_INDUSTRY`·`HOUSE_INDUSTRY` …) | 킷별 값. `CARE_KIT`·`HOUSE_KIT` 딕셔너리가 이 값들을 모읍니다. `COMMON_FACTS`·`COMMON_TERMINOLOGY`는 두 킷 모두에 들어가는 법인 공통 자료입니다. 업종 문구에 다른 사업을 함께 적으면 글에 섞이니 킷마다 그 사업만 적으세요 |
+| `split_single_kit()` · `HOUSE_POST_TYPES` · `*_KEYWORD_TERMS` | 예전(킷 한 개) 설치를 두 킷으로 나누는 1회성 마이그레이션. 새 회사는 손댈 필요가 없습니다(새 설치에서는 아무것도 하지 않음) |
 | `TOPIC_CALENDAR` | 대시보드 📅 추천 주제. `month`(0=상시)·`post_type`(`ai_workers/post_types.py`의 키)·`title`·`memo`. 메모에는 다룰 주제만 쓰고 회사 사실은 지어내지 마세요. 제공하지 않는 서비스를 끌어들이는 주제는 넣지 않습니다 |
 
 다 채운 뒤 `seed_if_empty()` 함수 자체는 건드리지 마세요 — 이름 그대로 **비어 있을 때만** 실행되는
@@ -128,7 +136,8 @@ primary/primary_dark/secondary/accent/mint/bg/text/text_muted). Flet 테마(`fle
 
 | 파일 | 내용 |
 |---|---|
-| `flet_app/main.py`의 `page.title`, `flet_app/pyproject.toml`의 `description`·`product`·`org`·`company` | 창 제목과 빌드된 exe의 제품명입니다. 창 제목은 실행 후 브랜드 킷의 `sub_brand`로 바뀌지만, 처음 뜨는 순간과 exe 이름에는 이 값이 보입니다. |
+| `flet_app/main.py`의 `page.title`, `flet_app/pyproject.toml`의 `description`·`product`·`org`·`company` | 창 제목과 빌드된 exe의 제품명입니다. 창 제목은 실행 후 회사 공통의 기업명으로 바뀌지만, 처음 뜨는 순간과 exe 이름에는 이 값이 보입니다. |
+| `flet_app/assets/icon.png`, `installer/osmu-gangseonanum.iss`, `.github/workflows/flet-windows-build.yml` | 앱·설치 프로그램 아이콘(512px 투명 PNG)과 설치 프로그램 이름·경로. **다른 회사로 바꿀 때는 `.iss`의 `AppId` GUID를 반드시 새로 만드세요** — 같은 GUID면 Windows가 두 앱을 같은 앱으로 봅니다. 데이터 폴더 이름(`core/db.py`의 `OSMU_GANGSEONANUM`)과 `core/transfer.py`의 `FORMAT`도 회사마다 다르게 둡니다. |
 | `flet_app/simulators/__init__.py`, `instagram.py` | 시뮬레이터의 `"더봄봄"`/`"thestitch_artplay"` 기본값. 브랜드 킷 값이 비어 있을 때만 쓰이는 fallback이라 우선순위는 낮습니다. |
 | `flet_app/views/workbench_view.py`, `brand_kit_view.py` 등 | 도움말·placeholder 예시 문구 (현재 가사서비스 예시로 교체됨). |
 | `ai_workers/factsheet.py` | 공지/제품 정보 입력 필드(일시·장소·최소주문수량 등)는 소규모 제작·리테일 업종에 맞춰져 있습니다. 업종이 크게 다르면(예: 요식업, SaaS) 필드 구성 자체를 조정할 수 있습니다. |

@@ -269,7 +269,11 @@ SUBJECT_INSTRUCTION = (
     "것은 위 소재의 구체적인 내용입니다. 회사 소개·기관 철학·서비스 목록·사회적 가치는 "
     "이 소재를 설명하는 데 필요한 만큼만 곁들이세요. 소재를 한두 문장으로 스치고 일반적인 "
     "브랜드 소개로 넘어가는 글은 실패한 글입니다. 소재가 교육·강의라면 교육 이야기를, "
-    "행사·채용이라면 그 이야기를 하세요 — 서비스 홍보 글로 바꾸지 마세요."
+    "행사·채용이라면 그 이야기를 하세요 — 서비스 홍보 글로 바꾸지 마세요. "
+    # "메모와 다른 사업 분야 내용이 글에 섞인다"는 OSMU_cjc 피드백 — 여기서는 주간보호 글에 가사서비스가,
+    # 가사서비스 글에 주간보호가 끼어드는 일입니다. 킷을 나눠도 회사 소개 문장으로 다시 섞일 수 있습니다.
+    "소재가 회사의 사업과 직접 관련이 없으면, 회사 소개는 글 마지막 한두 문장 이하로만 쓰고, "
+    "소재와 관계없는 다른 사업 분야(주간보호 글의 가사서비스, 가사서비스 글의 주간보호 등)의 이야기를 끼워 넣지 마세요."
 )
 
 
@@ -291,17 +295,29 @@ BLOG_SYSTEM_PROMPT_BASE = (
 )
 
 
-def build_blog_system_prompt(brand_kit: dict, mode: dict | None = None) -> str:
+# 서식을 켠 글에서는 "#를 쓰지 말라"는 문장을 서식 지시로 바꿉니다 — 같은 프롬프트 안에서
+# 두 지시가 부딪치면 모델이 어느 쪽을 따를지 알 수 없습니다(ai_workers/formatting.py).
+_PLAIN_ONLY_SENTENCE = "마크다운 제목 기호(#)는 쓰지 말고, 문단으로만 구성하세요."
+_FORMATTED_SENTENCE = "서식은 아래 [원고 서식]에 정한 표시만 쓰세요."
+
+
+def build_blog_system_prompt(brand_kit: dict, mode: dict | None = None, design_instruction: str | None = None) -> str:
     """Full Naver-blog system prompt: base + persona + facts + few-shot +
-    glossary + (mode-dependent) keyword pressure and length target."""
+    glossary + (mode-dependent) keyword pressure and length target, and — when
+    the post's 서식 강도 isn't '사용 안 함' — the formatting instruction."""
     profile = mode or content_mode.resolve(None, brand_kit)
-    parts = [BLOG_SYSTEM_PROMPT_BASE]
+    base = BLOG_SYSTEM_PROMPT_BASE
+    if design_instruction:
+        base = base.replace(_PLAIN_ONLY_SENTENCE, _FORMATTED_SENTENCE)
+    parts = [base]
     parts += persona_block(brand_kit)
     parts += core_facts_block(brand_kit)
     parts += few_shot_block(brand_kit)
     parts += terminology_block(brand_kit)
     parts += seo_block(brand_kit, profile.get("hint", content_mode.HINT_RELEVANCE))
     parts += length_block(profile.get("length_range"))
+    if design_instruction:
+        parts.append(design_instruction)
     return "\n\n".join(parts)
 
 

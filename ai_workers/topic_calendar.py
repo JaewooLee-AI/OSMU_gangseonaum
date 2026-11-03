@@ -32,11 +32,11 @@ def suggestions(today: date | None = None, used: set | None = None) -> dict:
     this_month = today.month
     next_month = this_month % 12 + 1
 
-    # 기본 화자(주간보호·방문요양) 주제가 먼저 — SNS 강화의 대상 사업입니다. 그다음 안 쓴 주제 순.
+    # 돌봄센터 킷 주제가 먼저 — SNS 강화의 대상 사업입니다. 그다음 안 쓴 주제 순.
     from ai_workers import post_types
 
     def rank(t: dict):
-        return (post_types.voice_of(t.get("post_type")) == "house", t["title"] in used)
+        return (post_types.kit_of(t.get("post_type")) == "house", t["title"] in used)
 
     def pick(month: int) -> List[dict]:
         rows = [t for t in brand_seed.TOPIC_CALENDAR if t["month"] == month]

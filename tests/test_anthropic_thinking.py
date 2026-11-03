@@ -50,7 +50,7 @@ def test_older_models_are_sent_unchanged(model):
 def test_text_call_sends_headroom_and_returns_only_text(monkeypatch):
     from ai_workers import multi_llm_router as r
     sent = _fake_anthropic(monkeypatch, _response("완성된 본문"))
-    text, _in, _out, truncated = r._call_anthropic("claude-sonnet-5-5", "k", "프롬프트", "시스템", 4000)
+    text, _in, _out, truncated, _cached = r._call_anthropic("claude-sonnet-5-5", "k", "프롬프트", "시스템", 4000)
     assert text == "완성된 본문" and truncated is False
     assert sent[0]["max_tokens"] == 4000 + r._REASONING_HEADROOM
     assert sent[0]["output_config"] == {"effort": "medium"}

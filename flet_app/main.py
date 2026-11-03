@@ -172,8 +172,9 @@ def main(page: ft.Page) -> None:
     if seeded:
         page.show_dialog(ft.SnackBar(ft.Text("회사 자료 기반 Brand Kit을 초기 세팅했습니다.")))
 
-    brand_kit = repo.get_brand_kit()
-    page.window.title = f"{brand_kit.get('sub_brand') or ''} OSMU 워크벤치".strip()
+    # 창 제목은 회사 이름으로 — 킷이 둘(돌봄센터·가사서비스)이라 한 킷의 브랜드명을 쓰지 않습니다.
+    company = (repo.get_company_profile().get("brand_name") or "").replace("사회적협동조합", "").strip()
+    page.window.title = f"{company} OSMU 워크벤치".strip() if company else page.title
 
     show(DEFAULT_INDEX)
 

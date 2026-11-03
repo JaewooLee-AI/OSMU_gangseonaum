@@ -7,10 +7,19 @@ from every caller.
 """
 from __future__ import annotations
 
+import contextvars
 import uuid
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
 
-from core.db import dumps, get_conn, loads
+from core.db import (
+    _APP_SETTINGS_COLUMNS,
+    _COMPANY_COLUMNS,
+    DEFAULT_KIT_NAME,
+    dumps,
+    get_conn,
+    loads,
+)
 
 # --- column encoding map ----------------------------------------------------
 # name -> default value when the column is empty/absent.
@@ -26,6 +35,7 @@ _CAMPAIGN_JSON_COLS = {
     "shorts_script": None,
     "daangn_post": None,
     "photo_captions": {},
+    "content_format": {},
 }
 
 _BRAND_KIT_JSON_COLS = {
@@ -35,17 +45,27 @@ _BRAND_KIT_JSON_COLS = {
     "seo_keywords": [],
     "keyword_weights": {},
     "non_target_keywords": [],
-    "blacklist_map": {},
     "service_areas": [],
     "product_defaults": {},
-    "care_defaults": {},
-    "house_voice": {},
-    "news_exclude_terms": [],
-    "enabled_channels": ["instagram", "x", "shorts", "daangn"],
 }
+_COMPANY_JSON_COLS = {"blacklist_map": {}, "news_exclude_terms": []}
+_APP_SETTINGS_JSON_COLS = {"enabled_channels": ["instagram", "x", "shorts", "daangn"]}
 
 _CAMPAIGN_BOOL_COLS = ("guardrail_passed",)
-_BRAND_KIT_BOOL_COLS = ("guardrail_enabled", "vision_enabled")
+_BRAND_KIT_BOOL_COLS = ("is_archived",)
+_COMPANY_BOOL_COLS = ("guardrail_enabled",)
+_APP_SETTINGS_BOOL_COLS = ("vision_enabled",)
+
+# 킷마다 따로 두는 값. 이 밖의 값은 회사 공통(company_profile)이거나 앱 설정(app_settings)입니다.
+BRAND_KIT_FIELDS = (
+    "name", "sub_brand", "industry", "persona", "tone_and_manner", "core_facts", "few_shot_samples",
+    "terminology", "seo_keywords", "keyword_weights", "non_target_keywords", "default_content_mode",
+    "service_areas", "product_defaults", "design_template", "design_strength",
+)
+# 킷을 복제할 때 옮기는 값 — 이름만 빼고 전부. kit_key는 옮기지 않습니다(분야마다 하나).
+_KIT_COPY_FIELDS = tuple(f for f in BRAND_KIT_FIELDS if f != "name")
+COMPANY_FIELDS = _COMPANY_COLUMNS
+APP_SETTINGS_FIELDS = _APP_SETTINGS_COLUMNS
 
 
 def _decode(row, json_cols: Dict[str, Any], bool_cols) -> Optional[Dict[str, Any]]:
@@ -114,29 +134,258 @@ def delete_llm_setting(vendor: str) -> None:
         conn.execute("delete from llm_settings where vendor = ?", (vendor,))
 
 
-# --- brand_kit --------------------------------------------------------------
+# --- brand_kit · company_profile · app_settings -----------------------------
+# 브랜드 킷은 여러 개이고(사업 분야별: 돌봄센터 / 가사서비스), 회사 공통 값과 앱 설정은 한 줄씩입니다.
+# get_brand_kit()은 셋을 합친 dict를 돌려줍니다 — 생성 파이프라인은 "이 글을 쓸 때
+# 필요한 모든 값"을 한 번에 받으면 되고, 어느 값이 어느 테이블에 있는지 몰라도 됩니다.
 
-def get_brand_kit() -> Dict[str, Any]:
+class BrandKitError(ValueError):
+    """킷 보관·이름 규칙 위반 — 화면에 그대로 보여줄 수 있는 문장을 담습니다."""
+
+
+def get_company_profile() -> Dict[str, Any]:
     with get_conn() as conn:
-        row = conn.execute("select * from brand_kit where id = 1").fetchone()
-    return _decode(row, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS) or {}
+        row = conn.execute("select * from company_profile where id = 1").fetchone()
+    data = _decode(row, _COMPANY_JSON_COLS, _COMPANY_BOOL_COLS) or {}
+    data.pop("id", None)
+    data.pop("updated_at", None)
+    return data
 
 
-def save_brand_kit(**fields) -> None:
+def save_company_profile(**fields) -> None:
+    _save_single_row("company_profile", COMPANY_FIELDS, _COMPANY_JSON_COLS, _COMPANY_BOOL_COLS, fields)
+
+
+def get_app_settings() -> Dict[str, Any]:
+    with get_conn() as conn:
+        row = conn.execute("select * from app_settings where id = 1").fetchone()
+    data = _decode(row, _APP_SETTINGS_JSON_COLS, _APP_SETTINGS_BOOL_COLS) or {}
+    data.pop("id", None)
+    data.pop("updated_at", None)
+    return data
+
+
+def save_app_settings(**fields) -> None:
+    _save_single_row("app_settings", APP_SETTINGS_FIELDS, _APP_SETTINGS_JSON_COLS, _APP_SETTINGS_BOOL_COLS, fields)
+
+
+def _save_single_row(table: str, allowed, json_cols, bool_cols, fields: Dict[str, Any]) -> None:
+    unknown = set(fields) - set(allowed)
+    if unknown:
+        raise KeyError(f"{table}에 없는 항목: {sorted(unknown)}")
     if not fields:
         return
-    encoded = _encode(fields, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS)
+    encoded = _encode(fields, json_cols, bool_cols)
     assignments = ", ".join(f"{k} = ?" for k in encoded)
     with get_conn() as conn:
-        conn.execute("insert or ignore into brand_kit (id) values (1)")
+        conn.execute(f"insert or ignore into {table} (id) values (1)")
         conn.execute(
-            f"update brand_kit set {assignments}, updated_at = datetime('now') where id = 1",
+            f"update {table} set {assignments}, updated_at = datetime('now') where id = 1",
             tuple(encoded.values()),
         )
 
 
-def append_tone_rule(rule: str) -> bool:
-    """Adds `rule` as a new "- " bullet at the end of the tone guide.
+def list_brand_kits(include_archived: bool = False) -> List[Dict[str, Any]]:
+    """킷 목록(킷 값만, 공통 값은 합치지 않음). 보관된 킷은 뒤에 옵니다."""
+    sql = "select * from brand_kit"
+    if not include_archived:
+        sql += " where is_archived = 0"
+    sql += " order by is_archived, sort_order, id"
+    with get_conn() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [_decode(r, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS) for r in rows]
+
+
+def default_brand_kit_id() -> Optional[int]:
+    """목록 맨 앞의(보관되지 않은) 킷 — 킷을 고르지 않은 곳이 쓰는 킷입니다."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "select id from brand_kit order by is_archived, sort_order, id limit 1"
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def kit_id_for_key(kit_key: Optional[str]) -> Optional[int]:
+    """회사 자료로 만든 킷('care' | 'house')의 ID. 그 킷이 보관됐거나 없으면 None."""
+    if not kit_key:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "select id from brand_kit where kit_key = ? and is_archived = 0 order by id limit 1", (kit_key,)
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def _get_kit_row(kit_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = None
+        if kit_id is not None:
+            row = conn.execute("select * from brand_kit where id = ?", (kit_id,)).fetchone()
+        if row is None:
+            row = conn.execute(
+                "select * from brand_kit order by is_archived, sort_order, id limit 1"
+            ).fetchone()
+    return _decode(row, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS)
+
+
+def get_brand_kit(kit_id: Optional[int] = None) -> Dict[str, Any]:
+    """킷 값 + 회사 공통 값 + 앱 설정을 합친 dict.
+
+    `kit_id`가 None이거나 없는 킷이면 기본 킷(default_brand_kit_id)을 씁니다.
+    보관된 킷도 ID로 직접 부르면 그대로 돌려줍니다 — 그 킷으로 쓰던 글은 계속
+    그 킷으로 다시 생성할 수 있어야 하기 때문입니다.
+    """
+    merged: Dict[str, Any] = {}
+    merged.update(get_app_settings())
+    merged.update(get_company_profile())
+    kit = _get_kit_row(kit_id) or {}
+    merged.update(kit)
+    return merged
+
+
+def get_campaign_brand_kit(campaign: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """글에 연결된 킷으로 get_brand_kit()을 부릅니다."""
+    return get_brand_kit((campaign or {}).get("brand_kit_id"))
+
+
+def save_brand_kit(kit_id: Optional[int] = None, **fields) -> None:
+    """값마다 맞는 테이블에 저장합니다 — 킷 값은 `kit_id` 킷에(None이면 기본 킷),
+    회사 공통 값은 company_profile에, 앱 설정은 app_settings에."""
+    kit_fields = {k: v for k, v in fields.items() if k in BRAND_KIT_FIELDS or k == "kit_key"}
+    company_fields = {k: v for k, v in fields.items() if k in COMPANY_FIELDS}
+    app_fields = {k: v for k, v in fields.items() if k in APP_SETTINGS_FIELDS}
+    unknown = set(fields) - set(kit_fields) - set(company_fields) - set(app_fields)
+    if unknown:
+        raise KeyError(f"브랜드 킷에 없는 항목: {sorted(unknown)}")
+    if company_fields:
+        save_company_profile(**company_fields)
+    if app_fields:
+        save_app_settings(**app_fields)
+    if not kit_fields:
+        return
+    if "name" in kit_fields:
+        kit_fields["name"] = _clean_kit_name(kit_fields["name"], exclude_id=kit_id)
+    target = kit_id if kit_id is not None else default_brand_kit_id()
+    encoded = _encode(kit_fields, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS)
+    assignments = ", ".join(f"{k} = ?" for k in encoded)
+    with get_conn() as conn:
+        conn.execute(
+            f"update brand_kit set {assignments}, updated_at = datetime('now') where id = ?",
+            tuple(encoded.values()) + (target,),
+        )
+
+
+def _clean_kit_name(name: Optional[str], exclude_id: Optional[int] = None) -> str:
+    """앞뒤 공백을 지우고, 빈 이름과 (보관되지 않은 킷끼리) 같은 이름을 막습니다.
+    선택 목록에서 같은 이름 두 개는 구별할 수 없기 때문입니다."""
+    cleaned = " ".join((name or "").split())
+    if not cleaned:
+        raise BrandKitError("킷 이름을 입력해주세요.")
+    with get_conn() as conn:
+        row = conn.execute(
+            "select id from brand_kit where name = ? and is_archived = 0 and id != ?",
+            (cleaned, exclude_id if exclude_id is not None else -1),
+        ).fetchone()
+    if row:
+        raise BrandKitError(f"'{cleaned}' 이름의 킷이 이미 있습니다. 다른 이름을 써주세요.")
+    return cleaned
+
+
+def unique_kit_name(base: str) -> str:
+    """'돌봄센터 복사본', '돌봄센터 복사본 2' … 처럼 겹치지 않는 이름을 만듭니다."""
+    existing = {k["name"] for k in list_brand_kits()}
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base} {n}" in existing:
+        n += 1
+    return f"{base} {n}"
+
+
+def create_brand_kit(name: str, copy_from: Optional[int] = None, values: Optional[Dict[str, Any]] = None,
+                     kit_key: Optional[str] = None) -> int:
+    """새 킷을 만들고 ID를 돌려줍니다. 내용은 `copy_from` 킷(None이면 기본 킷)을 그대로
+    복사하고, `values`가 있으면 그 값으로 덮어씁니다(core.brand_seed가 회사 자료로 킷을 만들 때)."""
+    cleaned = _clean_kit_name(name)
+    if values is None:
+        source = _get_kit_row(copy_from) or {}
+        values = {k: source.get(k) for k in _KIT_COPY_FIELDS if source.get(k) is not None}
+    else:
+        values = {k: v for k, v in values.items() if k in _KIT_COPY_FIELDS}
+    encoded = _encode(values, _BRAND_KIT_JSON_COLS, _BRAND_KIT_BOOL_COLS)
+    cols = ["name", "kit_key", "sort_order", *encoded.keys()]
+    with get_conn() as conn:
+        next_order = conn.execute("select coalesce(max(sort_order), 0) + 1 as n from brand_kit").fetchone()["n"]
+        cur = conn.execute(
+            f"insert into brand_kit ({', '.join(cols)}) values ({', '.join('?' * len(cols))})",
+            (cleaned, kit_key, next_order, *encoded.values()),
+        )
+        return cur.lastrowid
+
+
+def count_campaigns_using_kit(kit_id: int, unpublished_only: bool = True) -> int:
+    sql = "select count(*) as n from campaigns where brand_kit_id = ?"
+    if unpublished_only:
+        sql += " and status != 'published'"
+    with get_conn() as conn:
+        return conn.execute(sql, (kit_id,)).fetchone()["n"]
+
+
+def archive_brand_kit(kit_id: int, move_unpublished_to: Optional[int] = None) -> int:
+    """킷을 보관(화면 표기 '삭제')합니다. 행은 지우지 않으므로 restore_brand_kit으로 되살릴 수 있습니다.
+
+    `move_unpublished_to`를 주면 그 킷을 쓰던, 아직 게시되지 않은 글을 그 킷으로 옮기고
+    옮긴 글 수를 돌려줍니다. 보관되지 않은 마지막 킷은 보관할 수 없습니다.
+    """
+    with get_conn() as conn:
+        conn.execute("begin immediate")
+        active = [r["id"] for r in conn.execute("select id from brand_kit where is_archived = 0")]
+        if kit_id not in active:
+            return 0
+        if len(active) <= 1:
+            raise BrandKitError("마지막 남은 브랜드 킷은 삭제할 수 없습니다. 새 킷을 먼저 만들어주세요.")
+        moved = 0
+        if move_unpublished_to is not None:
+            target = conn.execute(
+                "select id, name from brand_kit where id = ? and is_archived = 0", (move_unpublished_to,)
+            ).fetchone()
+            if target is None or target["id"] == kit_id:
+                raise BrandKitError("글을 옮길 킷을 다시 골라주세요.")
+            moved = conn.execute(
+                "update campaigns set brand_kit_id = ?, brand_kit_name = ?, updated_at = datetime('now') "
+                "where brand_kit_id = ? and status != 'published'",
+                (target["id"], target["name"], kit_id),
+            ).rowcount
+        conn.execute(
+            "update brand_kit set is_archived = 1, updated_at = datetime('now') where id = ?", (kit_id,)
+        )
+        return moved
+
+
+def restore_brand_kit(kit_id: int) -> str:
+    """보관한 킷을 되살리고 최종 이름을 돌려줍니다. 그 사이 같은 이름의 킷이
+    생겼으면 '(되살림)'을 붙여 겹치지 않게 합니다."""
+    kit = _get_kit_row(kit_id)
+    if not kit or kit.get("id") != kit_id:
+        raise BrandKitError("되살릴 킷을 찾지 못했습니다.")
+    name = kit.get("name") or DEFAULT_KIT_NAME
+    if name in {k["name"] for k in list_brand_kits()}:
+        name = unique_kit_name(f"{name} (되살림)")
+    with get_conn() as conn:
+        conn.execute(
+            "update brand_kit set is_archived = 0, name = ?, updated_at = datetime('now') where id = ?",
+            (name, kit_id),
+        )
+    return name
+
+
+def kit_state_key(base: str, kit_id: Optional[int]) -> str:
+    """킷마다 따로 두는 app_state 키 — 예: kit_state_key("sweep", 3) == "sweep:3"."""
+    return f"{base}:{kit_id}"
+
+
+def append_tone_rule(rule: str, kit_id: Optional[int] = None) -> bool:
+    """Adds `rule` as a new "- " bullet at the end of the kit's tone guide.
 
     Returns False (and changes nothing) if the guide already contains it.
     Backs the workbench's "이 요청을 브랜드 킷에 저장" button: a revision
@@ -146,11 +395,12 @@ def append_tone_rule(rule: str) -> bool:
     rule = " ".join((rule or "").split()).lstrip("-• ").strip()
     if not rule:
         return False
-    current = (get_brand_kit().get("tone_and_manner") or "").rstrip()
+    kit = get_brand_kit(kit_id)
+    current = (kit.get("tone_and_manner") or "").rstrip()
     if rule in current:
         return False
     updated = f"{current}\n- {rule}" if current else f"- {rule}"
-    save_brand_kit(tone_and_manner=updated)
+    save_brand_kit(kit.get("id"), tone_and_manner=updated)
     return True
 
 
@@ -179,20 +429,29 @@ def get_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
     return _decode(row, _CAMPAIGN_JSON_COLS, _CAMPAIGN_BOOL_COLS)
 
 
-def recent_posts(exclude_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+def recent_posts(
+    exclude_id: Optional[str] = None,
+    limit: int = 10,
+    brand_kit_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """Title + body of the most recently touched campaigns that have a body,
     newest first — the history ai_workers/body_variety.py compares against.
-    Excludes the campaign being generated, which would match itself."""
+    Excludes the campaign being generated, which would match itself.
+    When `brand_kit_id` is passed, filters to posts written with that kit so
+    the other business's opening/closing sentences aren't injected into the draft prompt."""
+    sql = """
+        select id, title, content from campaigns
+        where content is not null and trim(content) != '' and id != ?
+          and status != 'processing'
+    """
+    params: list = [exclude_id or ""]
+    if brand_kit_id is not None:
+        sql += " and brand_kit_id = ?"
+        params.append(brand_kit_id)
+    sql += " order by updated_at desc limit ?"
+    params.append(limit)
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            select id, title, content from campaigns
-            where content is not null and trim(content) != '' and id != ?
-              and status != 'processing'
-            order by updated_at desc limit ?
-            """,
-            (exclude_id or "", limit),
-        ).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -211,20 +470,31 @@ def insert_campaign(
     memo: Optional[str] = None,
     status: str = "awaiting_media",
     source_title: Optional[str] = None,
+    brand_kit_id: Optional[int] = None,
     **extra,
 ) -> Dict[str, Any]:
+    """`brand_kit_id`가 None이면 기본 킷에 연결합니다."""
     campaign_id = uuid.uuid4().hex
+    kit = _get_kit_row(brand_kit_id) or {}
     with get_conn() as conn:
         conn.execute(
             """
-            insert into campaigns (id, source_type, source_url, source_title, title, memo, status)
-            values (?, ?, ?, ?, ?, ?, ?)
+            insert into campaigns (id, source_type, source_url, source_title, title, memo, status,
+                                   brand_kit_id, brand_kit_name)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (campaign_id, source_type, source_url, source_title, title, memo, status),
+            (campaign_id, source_type, source_url, source_title, title, memo, status,
+             kit.get("id"), kit.get("name")),
         )
     if extra:
         update_campaign(campaign_id, **extra)
     return get_campaign(campaign_id)
+
+
+def set_campaign_brand_kit(campaign_id: str, kit_id: int) -> None:
+    """글의 킷을 바꾸고 이름 스냅샷도 그 킷의 지금 이름으로 맞춥니다."""
+    kit = _get_kit_row(kit_id) or {}
+    update_campaign(campaign_id, brand_kit_id=kit.get("id"), brand_kit_name=kit.get("name"))
 
 
 def update_campaign(campaign_id: str, **fields) -> None:
@@ -387,6 +657,43 @@ def mark_sns_stale(campaign_id: str) -> None:
 def delete_campaign(campaign_id: str) -> None:
     with get_conn() as conn:
         conn.execute("delete from campaigns where id = ?", (campaign_id,))
+
+
+def mark_published(campaign_id: str, url: Optional[str] = None) -> None:
+    """게시 완료로 바꿉니다. `url`이 있으면 네이버 글 주소도 저장합니다(없으면 이전 주소 유지).
+
+    게시 시각(published_at)은 update_campaign이 처음 게시 완료로 바뀔 때 한 번 남깁니다.
+    """
+    fields: Dict[str, Any] = {"status": "published", "publish_error": None}
+    cleaned = normalize_post_url(url)
+    if cleaned:
+        fields["published_url"] = cleaned
+    update_campaign(campaign_id, **fields)
+
+
+def normalize_post_url(url: Optional[str]) -> Optional[str]:
+    """담당자가 붙여 넣은 주소를 정리합니다. 주소처럼 보이지 않으면 None."""
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return None
+    if not cleaned.lower().startswith(("http://", "https://")):
+        if cleaned.lower().startswith(("blog.naver.com", "m.blog.naver.com")):
+            cleaned = "https://" + cleaned
+        else:
+            return None
+    return cleaned
+
+
+def set_published_url(campaign_id: str, url: Optional[str]) -> bool:
+    """게시 완료 글의 주소를 고칩니다. 빈 값이면 지웁니다. 주소 형식이 아니면 False."""
+    if not (url or "").strip():
+        update_campaign(campaign_id, published_url=None)
+        return True
+    cleaned = normalize_post_url(url)
+    if not cleaned:
+        return False
+    update_campaign(campaign_id, published_url=cleaned)
+    return True
 
 
 def reset_generated_content() -> Dict[str, int]:
@@ -709,6 +1016,53 @@ def naver_calls_today() -> int:
 
 # --- usage log --------------------------------------------------------------
 
+# 지금 돌고 있는 생성 작업의 글 ID. content_writer가 usage_scope()로 감싸 두면, 그 안에서
+# 일어난 LLM 호출이 어느 글의 비용인지 기록됩니다. 스레드풀로 넘길 때는 호출하는 쪽이
+# contextvars.copy_context()로 넘겨야 합니다(ThreadPoolExecutor는 컨텍스트를 물려주지 않음).
+_USAGE_CAMPAIGN: contextvars.ContextVar = contextvars.ContextVar("usage_campaign", default=None)
+
+
+@contextmanager
+def usage_scope(campaign_id: Optional[str]) -> Iterator[None]:
+    token = _USAGE_CAMPAIGN.set(campaign_id)
+    try:
+        yield
+    finally:
+        _USAGE_CAMPAIGN.reset(token)
+
+
+def current_usage_campaign() -> Optional[str]:
+    return _USAGE_CAMPAIGN.get()
+
+
+def _price_row(conn, vendor: Optional[str], model: Optional[str]):
+    if not vendor or not model:
+        return None
+    return conn.execute(
+        "select * from model_prices where vendor = ? and model = ?", (vendor, model)
+    ).fetchone()
+
+
+def compute_cost_usd(price, input_tokens: int, output_tokens: int, cached_input_tokens: int = 0) -> Optional[float]:
+    """100만 토큰당 단가로 계산한 금액. 단가가 없으면 None ('단가 미등록' — 0원이 아닙니다).
+
+    `input_tokens`는 캐시 입력을 포함한 전체 입력입니다. 캐시 단가가 비어 있으면
+    캐시 입력도 일반 입력 단가로 셉니다.
+    """
+    if price is None:
+        return None
+    cached = max(0, min(int(cached_input_tokens or 0), int(input_tokens or 0)))
+    fresh = max(0, int(input_tokens or 0) - cached)
+    cached_rate = price["cached_input_per_mtok"]
+    if cached_rate is None:
+        cached_rate = price["input_per_mtok"]
+    return (
+        fresh * price["input_per_mtok"]
+        + cached * cached_rate
+        + int(output_tokens or 0) * price["output_per_mtok"]
+    ) / 1_000_000
+
+
 def log_usage(
     kind: str,
     vendor: Optional[str] = None,
@@ -719,17 +1073,260 @@ def log_usage(
     est_output_tokens: int = 0,
     est_saved_tokens: int = 0,
     note: Optional[str] = None,
+    cached_input_tokens: int = 0,
+    campaign_id: Optional[str] = None,
 ) -> None:
+    campaign_id = campaign_id or current_usage_campaign()
     with get_conn() as conn:
+        price = _price_row(conn, vendor, model)
+        cost = compute_cost_usd(price, est_input_tokens, est_output_tokens, cached_input_tokens)
+        # 절감 토큰은 '안 보낸 입력'이라 입력 단가로 셉니다.
+        saved_cost = (est_saved_tokens * price["input_per_mtok"] / 1_000_000) if (price and est_saved_tokens) else None
         conn.execute(
             """
             insert into usage_log (kind, vendor, model, image_count, cache_hits,
-                                   est_input_tokens, est_output_tokens, est_saved_tokens, note)
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   est_input_tokens, est_output_tokens, est_saved_tokens, note,
+                                   campaign_id, cached_input_tokens, cost_usd, saved_cost_usd)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (kind, vendor, model, image_count, cache_hits,
-             est_input_tokens, est_output_tokens, est_saved_tokens, note),
+             est_input_tokens, est_output_tokens, est_saved_tokens, note,
+             campaign_id, cached_input_tokens, cost, saved_cost),
         )
+
+
+# --- prices · exchange rate · budget ----------------------------------------
+
+USD_KRW_STATE_KEY = "usd_krw"
+BUDGET_STATE_KEY = "usage_budget"
+# 환율 기본값. 실제 환율이 아니라 시작값이며, 화면에서 고쳐 쓰라고 안내합니다.
+DEFAULT_USD_KRW = 1400.0
+BUDGET_WARN_LEVELS = (70, 90)
+
+
+def list_model_prices() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute("select * from model_prices order by vendor, model").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_model_price(vendor: str, model: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = _price_row(conn, vendor, model)
+    return dict(row) if row else None
+
+
+def save_model_price(
+    vendor: str,
+    model: str,
+    input_per_mtok: float,
+    output_per_mtok: float,
+    cached_input_per_mtok: Optional[float] = None,
+) -> int:
+    """단가를 저장하고, 그 모델의 '단가 미등록'(금액 없음) 기록을 이 단가로 한 번 채웁니다.
+
+    이미 금액이 있는 기록은 그때 단가로 계산한 값이라 건드리지 않습니다 — 단가를 바꿔도
+    과거 금액이 바뀌지 않게. 돌려주는 값은 새로 채운 기록 수입니다.
+    """
+    vendor, model = (vendor or "").strip(), (model or "").strip()
+    if not vendor or not model:
+        raise ValueError("벤더와 모델 이름이 필요합니다.")
+    for value in (input_per_mtok, output_per_mtok, cached_input_per_mtok):
+        if value is not None and value < 0:
+            raise ValueError("단가는 0 이상이어야 합니다.")
+    with get_conn() as conn:
+        conn.execute(
+            """
+            insert into model_prices (vendor, model, input_per_mtok, output_per_mtok, cached_input_per_mtok)
+            values (?, ?, ?, ?, ?)
+            on conflict (vendor, model) do update set
+                input_per_mtok = excluded.input_per_mtok,
+                output_per_mtok = excluded.output_per_mtok,
+                cached_input_per_mtok = excluded.cached_input_per_mtok,
+                updated_at = datetime('now')
+            """,
+            (vendor, model, float(input_per_mtok), float(output_per_mtok),
+             None if cached_input_per_mtok is None else float(cached_input_per_mtok)),
+        )
+        return backfill_unpriced_usage(conn, vendor, model)
+
+
+def backfill_unpriced_usage(conn, vendor: str, model: str) -> int:
+    """그 모델의 '단가 미등록' 기록을 지금 단가로 한 번 채우고, 채운 기록 수를 돌려줍니다.
+    호출하는 쪽의 연결(트랜잭션) 안에서 돕니다 — core/transfer.py의 가져오기도 씁니다."""
+    price = _price_row(conn, vendor, model)
+    if price is None:
+        return 0
+    rows = conn.execute(
+        "select id, est_input_tokens, est_output_tokens, cached_input_tokens, est_saved_tokens "
+        "from usage_log where vendor = ? and model = ? and cost_usd is null",
+        (vendor, model),
+    ).fetchall()
+    for r in rows:
+        cost = compute_cost_usd(price, r["est_input_tokens"], r["est_output_tokens"], r["cached_input_tokens"])
+        saved = (r["est_saved_tokens"] * price["input_per_mtok"] / 1_000_000) if r["est_saved_tokens"] else None
+        conn.execute("update usage_log set cost_usd = ?, saved_cost_usd = ? where id = ?", (cost, saved, r["id"]))
+    return len(rows)
+
+
+def delete_model_price(vendor: str, model: str) -> None:
+    """단가만 지웁니다. 이미 계산된 과거 금액은 그대로 둡니다."""
+    with get_conn() as conn:
+        conn.execute("delete from model_prices where vendor = ? and model = ?", (vendor, model))
+
+
+def usage_models() -> List[Dict[str, Any]]:
+    """단가 표에 보여 줄 (벤더, 모델) — 실제로 호출된 모델 + 등록된 LLM 모델 + 단가가 있는 모델."""
+    with get_conn() as conn:
+        seen = conn.execute(
+            "select distinct vendor, model from usage_log where vendor is not null and model is not null"
+        ).fetchall()
+        registered = conn.execute("select vendor, model_name as model from llm_settings").fetchall()
+        priced = conn.execute("select vendor, model from model_prices").fetchall()
+    out, keys = [], set()
+    for r in list(seen) + list(registered) + list(priced):
+        key = (r["vendor"], r["model"])
+        if key not in keys and key[0] and key[1]:
+            keys.add(key)
+            out.append({"vendor": key[0], "model": key[1]})
+    return sorted(out, key=lambda x: (x["vendor"], x["model"]))
+
+
+def get_usd_krw() -> float:
+    value = (get_app_state(USD_KRW_STATE_KEY) or {}).get("value")
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_USD_KRW
+    return rate if rate > 0 else DEFAULT_USD_KRW
+
+
+def set_usd_krw(rate: float) -> None:
+    if rate is None or float(rate) <= 0:
+        raise ValueError("환율은 0보다 커야 합니다.")
+    set_app_state(USD_KRW_STATE_KEY, {"value": float(rate)})
+
+
+def get_monthly_budget_krw() -> Optional[float]:
+    value = (get_app_state(BUDGET_STATE_KEY) or {}).get("monthly_krw")
+    try:
+        budget = float(value)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
+def set_monthly_budget_krw(amount: Optional[float]) -> None:
+    """월 예산(원). None이나 0이면 예산 경고를 끕니다."""
+    if not amount or float(amount) <= 0:
+        set_app_state(BUDGET_STATE_KEY, {"monthly_krw": None})
+        return
+    set_app_state(BUDGET_STATE_KEY, {"monthly_krw": float(amount)})
+
+
+_COST_SELECT = """
+    count(*)                                        as calls,
+    coalesce(sum(est_input_tokens), 0)              as input_tokens,
+    coalesce(sum(est_output_tokens), 0)             as output_tokens,
+    coalesce(sum(cached_input_tokens), 0)           as cached_input_tokens,
+    coalesce(sum(est_saved_tokens), 0)              as saved_tokens,
+    coalesce(sum(cost_usd), 0)                      as cost_usd,
+    coalesce(sum(saved_cost_usd), 0)                as saved_cost_usd,
+    coalesce(sum(case when cost_usd is null and (est_input_tokens + est_output_tokens) > 0
+                      then 1 else 0 end), 0)        as unpriced_calls
+"""
+
+
+def _cost_summary(where: str = "", params: tuple = ()) -> Dict[str, Any]:
+    with get_conn() as conn:
+        row = conn.execute(f"select {_COST_SELECT} from usage_log {where}", params).fetchone()
+    out = dict(row)
+    rate = get_usd_krw()
+    out["cost_krw"] = out["cost_usd"] * rate
+    out["saved_cost_krw"] = out["saved_cost_usd"] * rate
+    return out
+
+
+def cost_today() -> Dict[str, Any]:
+    return _cost_summary("where date(ts, 'localtime') = date('now', 'localtime')")
+
+
+def cost_this_month() -> Dict[str, Any]:
+    return _cost_summary("where strftime('%Y-%m', ts, 'localtime') = strftime('%Y-%m', 'now', 'localtime')")
+
+
+def cost_all_time() -> Dict[str, Any]:
+    return _cost_summary()
+
+
+def cost_for_campaign(campaign_id: str, since_id: Optional[int] = None) -> Dict[str, Any]:
+    """한 글의 비용. `since_id`를 주면 그 기록 뒤의 호출만(=이번 생성 실행만) 셉니다."""
+    if since_id is None:
+        return _cost_summary("where campaign_id = ?", (campaign_id,))
+    return _cost_summary("where campaign_id = ? and id > ?", (campaign_id, since_id))
+
+
+def last_usage_id() -> int:
+    with get_conn() as conn:
+        return conn.execute("select coalesce(max(id), 0) as n from usage_log").fetchone()["n"]
+
+
+def cost_by_model() -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"select vendor, model, {_COST_SELECT} from usage_log group by vendor, model "
+            "order by cost_usd desc, calls desc"
+        ).fetchall()
+    rate = get_usd_krw()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["cost_krw"] = d["cost_usd"] * rate
+        out.append(d)
+    return out
+
+
+def generated_post_count() -> int:
+    """생성이 끝난 글 수(초안 이후 단계) — 글 1건당 평균 금액의 분모."""
+    with get_conn() as conn:
+        return conn.execute(
+            "select count(*) as n from campaigns where status in ('draft', 'ready_to_publish', 'published')"
+        ).fetchone()["n"]
+
+
+def budget_status() -> Dict[str, Any]:
+    """이번 달 사용액이 월 예산의 몇 %인지. 예산이 없으면 level=None.
+
+    level: None(예산 없음 또는 70% 미만) · 70 · 90 · 100(초과).
+    """
+    budget = get_monthly_budget_krw()
+    month = cost_this_month()
+    spent = month["cost_krw"]
+    out = {"budget_krw": budget, "spent_krw": spent, "ratio": None, "level": None,
+           "unpriced_calls": month["unpriced_calls"]}
+    if not budget:
+        return out
+    ratio = spent / budget
+    out["ratio"] = ratio
+    if ratio >= 1:
+        out["level"] = 100
+    else:
+        for lvl in reversed(BUDGET_WARN_LEVELS):
+            if ratio * 100 >= lvl:
+                out["level"] = lvl
+                break
+    return out
+
+
+def budget_message(status: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """예산 경고 문구 (경고할 것이 없으면 None). 대시보드·워크벤치·사용량 탭이 같은 문구를 씁니다."""
+    st = status or budget_status()
+    if not st.get("level"):
+        return None
+    pct = st["ratio"] * 100
+    head = "⛔ 이번 달 AI 사용 예산을 넘었습니다" if st["level"] >= 100 else f"⚠️ 이번 달 AI 사용 예산의 {st['level']}%를 넘었습니다"
+    return (f"{head} — 약 {st['spent_krw']:,.0f}원 / 예산 {st['budget_krw']:,.0f}원 ({pct:.0f}%). "
+            "생성은 계속할 수 있습니다. 금액은 등록한 단가로 계산한 추정값입니다.")
 
 
 def usage_totals() -> Dict[str, int]:
