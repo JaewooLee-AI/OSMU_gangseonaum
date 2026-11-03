@@ -127,7 +127,9 @@ def shorten_long_captions(script: dict, vendor: str) -> dict:
                     f"{n}. {text_of(slot)} (지금 {len(text_of(slot))}자)" for n, slot in enumerate(long_slots, 1)
                 ),
                 system=SHORTEN_SYSTEM_PROMPT,
-                max_tokens=400,
+                # 400이면 gemini-3.8-flash가 캡션 몇 줄의 JSON을 쓰다가 잘렸습니다(2026-11-03 실측) —
+                # 한도는 실제로 쓴 만큼만 과금되므로 넉넉히 둡니다.
+                max_tokens=1200,
                 note="shorts-shorten",
             )
             shorter = [str(c).strip() for c in (parse_json_object(raw).get("captions") or [])]

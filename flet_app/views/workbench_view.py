@@ -1328,6 +1328,24 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
             scale, "error",
         ))
 
+    rewritten = (report or {}).get("quotes_rewritten") or []
+    if rewritten:
+        controls.append(_status_box(
+            f"🗣️ 메모에 없는 인용 {len(rewritten)}개를 따옴표 없는 서술로 바꿨습니다 — "
+            + " / ".join(f"“{q}”" for q in rewritten)
+            + ". 실제로 들은 말이 있다면 메모에 적고 다시 생성하면 그 말을 쓸 수 있습니다.",
+            scale, "info",
+        ))
+    # 메모·자료에 없는 사람의 말이 따옴표로 들어간 경우 (content_writer.invented_quotes).
+    quotes = (report or {}).get("invented_quotes") or []
+    if quotes:
+        controls.append(_status_box(
+            f"🗣️ 메모에 없는 인용 {len(quotes)}개 — " + " / ".join(f"“{q}”" for q in quotes)
+            + ". 어르신·보호자·고객이 실제로 한 말이 아니면 지우거나, 메모의 실제 말로 바꾼 뒤 [본문 저장]을 누르세요. "
+            "지어낸 후기는 거짓 광고가 될 수 있습니다.",
+            scale, "warning",
+        ))
+
     for key, sheet in (("notice", factsheet.NOTICE), ("product", factsheet.PRODUCT)):
         section = (report or {}).get(key) or {}
         if section.get("checked") and section.get("missing_labels"):

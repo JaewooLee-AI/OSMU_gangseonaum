@@ -42,7 +42,7 @@ from ai_workers.guardrail import (
 )
 from ai_workers.daangn_writer import write_daangn_post
 from ai_workers.instagram_caption_writer import write_instagram_caption
-from ai_workers.multi_llm_router import generate_text, get_configured_vendor
+from ai_workers.multi_llm_router import generate_text, get_configured_vendor, parse_json_object
 from ai_workers.naver_hashtag_writer import write_naver_hashtags
 from ai_workers.news_scraper import scrape_article
 from ai_workers.photo_captions import write_captions
@@ -69,6 +69,7 @@ from ai_workers.seo_optimizer import (
     check_keyword_density,
     rebalance_keywords,
     rewrite_title_for_keyword,
+    subject_keywords,
     select_target_keywords,
     title_candidates,
     title_keyword_coverage,
@@ -352,6 +353,94 @@ def _format_report(content: str, content_format: dict) -> Dict:
     }
 
 
+# 따옴표 안의 말 — 사람의 발언·후기처럼 보이는 것. 작은따옴표는 강조('존엄케어')로 흔히 써서 보지 않습니다.
+_QUOTE_RE = re.compile(r"“([^”\n]{8,})”|\"([^\"\n]{8,})\"")
+
+
+def _norm_text(text: str) -> str:
+    return re.sub(r"[\s\.,!?~…·'\"“”‘’()\[\]-]", "", text or "")
+
+
+def invented_quotes(content: str, sources: List[str]) -> List[str]:
+    """따옴표로 쓴 사람의 말 중 자료(메모·뉴스 원문·공지 정보)에 없는 것.
+
+    실측(2026-11-03): 실버미술 메모로 쓴 글에 메모에 없던 어르신의 말("손이 마음대로 안 움직일 줄
+    알았는데…")이 인용구로 들어갔습니다. 지어낸 이용자 후기는 표시·광고상 문제가 될 수 있고, 프롬프트로
+    막아도 가끔 나오므로 결정론적으로 찾아 리포트에 남깁니다. 고치지는 않습니다 — 문장을 지우면 흐름이
+    깨지므로, 담당자가 메모의 실제 말로 바꾸거나 지우게 합니다.
+    """
+    haystack = _norm_text(" ".join(s for s in sources if s))
+    out: List[str] = []
+    for match in _QUOTE_RE.finditer(content or ""):
+        quote = (match.group(1) or match.group(2) or "").strip()
+        if " " not in quote:  # 한 단어짜리 강조는 발언이 아닙니다
+            continue
+        norm = _norm_text(quote)
+        if not norm or norm in haystack:
+            continue
+        pairs = [norm[i:i + 2] for i in range(len(norm) - 1)]
+        if pairs and sum(1 for p in pairs if p in haystack) / len(pairs) >= 0.7:
+            continue
+        if quote not in out:
+            out.append(quote)
+    return out
+
+
+QUOTE_FIX_SYSTEM_PROMPT = (
+    "당신은 네이버 블로그 편집자입니다. 아래 문단들에는 담당자 메모에 없는, 지어낸 사람의 말(따옴표 인용)이 "
+    "들어 있습니다. 각 문단에서 그 인용만 없애고, 메모에 있는 사실(행동·상황)만으로 담담하게 서술한 문단으로 "
+    "다시 쓰세요. 인용이 아닌 나머지 내용과 문체(존댓말)는 그대로 두고, 새로운 사실·감정·발언을 더하지 마세요. "
+    "따옴표를 쓰지 마세요. "
+    '반드시 아래 JSON만 출력하세요: {"paragraphs": [{"n": 1, "text": "다시 쓴 문단"}]}'
+)
+
+
+def rewrite_invented_quotes(content: str, quotes: List[str], memo: str, vendor: str, blacklist: dict):
+    """지어낸 인용이 든 문단을, 인용 없이 메모 사실만으로 다시 씁니다 (LLM 1회, 인용이 있을 때만).
+
+    프롬프트로 막아도(2026-11-03 재측정, 3회 중 3회) "잘 못 그릴 것 같다"며 망설이셨다 같은 말이 다시
+    나왔습니다 — 메모에는 '붓 잡기를 망설이셨다'뿐이었습니다. 바꾼 문단에 따옴표가 남았거나 원래 문단의
+    절반도 안 되게 짧아졌으면 그 문단은 그대로 두고 경고로 남깁니다. (바꾼 본문, 고친 인용 목록)을 돌려줍니다.
+    실패해도 본문은 그대로입니다.
+    """
+    lines = (content or "").split("\n")
+    targets: list = []  # (줄 번호, 그 줄의 인용들)
+    for n, line in enumerate(lines):
+        inside = [q for q in quotes if q in line]
+        if inside:
+            targets.append((n, inside))
+    if not targets:
+        return content, []
+    prompt = f"[담당자 메모]\n{memo or '(없음)'}\n\n[고칠 문단]\n" + "\n".join(
+        f"{i}. {lines[n].strip()}  ← 지어낸 인용: " + " / ".join(qs) for i, (n, qs) in enumerate(targets, 1)
+    )
+    try:
+        raw = generate_text(vendor=vendor, prompt=prompt, system=QUOTE_FIX_SYSTEM_PROMPT,
+                            max_tokens=1500, note="quote-fix")
+        items = parse_json_object(raw).get("paragraphs") or []
+    except Exception as exc:  # noqa: BLE001 — 고치지 못하면 경고로 남습니다
+        print(f"[content_writer] quote fix skipped: {exc}")
+        return content, []
+    fixed: list = []
+    for item in items:
+        try:
+            n, qs = targets[int(item.get("n")) - 1]
+        except (TypeError, ValueError, IndexError, AttributeError):
+            continue
+        text = " ".join(str(item.get("text") or "").split())
+        original = lines[n].strip()
+        if not text or any(mark in text for mark in "“”\"") or any(q in text for q in qs):
+            continue
+        # 인용만 있던 문단은 한 문장으로 짧아져도 됩니다. 다른 내용이 있던 문단은 절반 넘게 남아야 합니다.
+        quote_only = original.strip("“”\" ") in qs
+        if not quote_only and len(text) < len(original) * 0.5:
+            continue
+        text, _ = apply_blacklist_dictionary(text, blacklist or {})
+        lines[n] = text
+        fixed += [q for q in qs if q not in fixed]
+    return "\n".join(lines), fixed
+
+
 @_attributed
 def apply_format(campaign_id: str, strength: Optional[str] = None, progress: Progress = None) -> Dict:
     """[서식 적용] — 이미 생성된 글에 재생성 없이 서식만 입힙니다 (LLM 1회).
@@ -452,6 +541,7 @@ def _quality_pass(
         final_title, report["final_text"], target_keywords, vendor,
         minimum=profile.get("density_min", 2), maximum=profile.get("density_max", 6),
         enforce=profile.get("enforce_density", True),
+        style_rules=brand_kit.get("tone_and_manner") or "",
     )
     report["seo_density"] = density_report
 
@@ -662,6 +752,14 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             # original article — and it also skipped every title stage below,
             # since a pre-filled title means `needs_title` is False.
 
+        # 이 글의 소재 — 제목에 넣어도 되는 키워드(seo_optimizer.subject_keywords)와 지어낸 인용(invented_quotes)을
+        # 가리는 기준입니다. 서비스 기본값(📥 시트)은 넣지 않습니다: 모든 글에 같이 붙는 배경 사실이라, 넣으면
+        # '장기요양등급'처럼 소재와 무관한 키워드도 소재로 보입니다.
+        subject_text = "\n".join(t for t in (memo, source_title, article_text[:2000]) if t)
+        quote_sources = [memo, source_title, article_text,
+                         *(notice_fields or {}).values(), *(product_fields or {}).values()]
+        service_areas = brand_kit.get("service_areas") or []
+
         # --- stage 1: photo captions (cached + batched) ---
         _report(progress, f"사진 {len(storage_file_paths)}장 분석 중…" if storage_file_paths else "첨부 사진 없음")
         captions, photo_privacy = _captions_with_privacy(storage_file_paths)
@@ -716,10 +814,13 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             + (
                 [
                     _title_generation_instruction(
-                        title_candidates(
-                            seo_keywords,
-                            brand_kit.get("keyword_weights"),
-                            brand_kit.get("non_target_keywords"),
+                        subject_keywords(
+                            title_candidates(
+                                seo_keywords,
+                                brand_kit.get("keyword_weights"),
+                                brand_kit.get("non_target_keywords"),
+                            ),
+                            subject_text, service_areas,
                         ),
                         source_title,
                     )
@@ -801,6 +902,9 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             brand_kit.get("keyword_weights"),
             brand_kit.get("non_target_keywords"),
         )
+        # 소재와 맞는 키워드만 제목에 강제합니다 — seo_optimizer.subject_keywords 참고. 맞는 것이 없으면
+        # 모델이 지은 소재 중심 제목을 그대로 둡니다(본문 키워드 밀도는 4단계가 따로 맞춥니다).
+        title_eligible = subject_keywords(title_eligible, subject_text, service_areas)
         if needs_title and title_eligible and mode["rewrite_title"]:
             title_missing_keywords = title_keyword_coverage(final_title, title_eligible)
             # The title has room for one keyword, and it should be the best one.
@@ -871,6 +975,14 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
         }
         report["title_variety"] = title_variety
         report["photo_privacy"] = photo_privacy
+        report["invented_quotes"] = invented_quotes(final_content, quote_sources)
+        if report["invented_quotes"]:
+            _report(progress, "메모에 없는 인용을 고치는 중…")
+            final_content, fixed = rewrite_invented_quotes(
+                final_content, report["invented_quotes"], memo, vendor, brand_kit.get("blacklist_map") or {},
+            )
+            report["quotes_rewritten"] = fixed
+            report["invented_quotes"] = [q for q in report["invented_quotes"] if q not in fixed]
 
         # --- stage 6g: photo captions for Naver's 사진 설명 line ---
         # Written from the finished body (so each caption names the photo in
@@ -933,7 +1045,8 @@ LENGTH_RETRIES = 2
 REVISION_SYSTEM_PROMPT = (
     "당신은 네이버 블로그 편집자입니다. 아래 본문을 담당자의 요청에 따라 고쳐 쓰세요. "
     "요청과 무관한 부분은 원문의 문장과 표현을 그대로 유지하고, 요청된 부분만 바꿉니다. "
-    "새로운 사실이나 수치를 지어내지 마세요. "
+    "새로운 사실이나 수치를 지어내지 마세요. 원문과 요청에 없는 사람의 말(어르신·보호자·고객의 발언, 후기)을 "
+    "따옴표로 새로 지어내지 마세요. "
     "`[IMAGE: 경로]` 형식의 태그는 사진이 삽입될 위치 마크업이므로 삭제·수정하지 말고, "
     "개수와 순서를 그대로 유지한 채 문맥에 맞는 자리에 남겨두세요. "
     "고쳐 쓴 본문 전체만 출력하고 다른 설명은 절대 덧붙이지 마세요."
@@ -1133,6 +1246,14 @@ def revise_content(
         for key in SNS_REPORT_KEYS + ("photo_privacy",):
             if key in previous:
                 report[key] = previous[key]
+        # 지어낸 인용: 이번 수정이 새로 넣은 것 + 전에 경고했는데 아직 남은 것. 원래 본문에 있던(담당자가 쓴)
+        # 따옴표는 새로 경고하지 않습니다.
+        quote_sources = [campaign.get("memo") or "", instruction,
+                         *(campaign.get("notice_fields") or {}).values(), *(campaign.get("product_fields") or {}).values()]
+        earlier = set(previous.get("invented_quotes") or [])
+        report["invented_quotes"] = [
+            q for q in invented_quotes(final_content, quote_sources) if q in earlier or q not in base_content
+        ]
         report.setdefault("sns_checks", {})["naver_tags"] = tag_issues
         has_sns = bool(
             campaign.get("instagram_caption") or campaign.get("x_content")

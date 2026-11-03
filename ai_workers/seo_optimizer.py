@@ -41,7 +41,13 @@ MIN_MENTIONS_TO_TARGET = 2
 REBALANCE_SYSTEM_PROMPT = (
     "당신은 네이버 블로그 SEO 편집자입니다. 아래 텍스트에서 특정 키워드가 너무 적거나 "
     "너무 많이 등장합니다. 문장의 자연스러움과 원래 의미, 톤을 해치지 않는 선에서 "
-    "키워드 노출 빈도만 조정한 전체 텍스트를 그대로 출력하세요. 텍스트 중간에 "
+    "키워드 노출 빈도만 조정한 전체 텍스트를 그대로 출력하세요. "
+    # 실측(2026-11-03): '전문 가사도우미 손길이 필요한 우렁각시 홈서비스 관리사님이' — 횟수를 채우려고
+    # 사람을 꾸미는 말로 키워드를 끼워 넣어 문장이 깨졌습니다.
+    "키워드를 사람·이름 앞에 꾸미는 말로 끼워 넣거나, 한 문장에 키워드를 겹쳐 넣지 마세요. "
+    "키워드가 자연스럽게 들어가는 짧은 문장을 새로 하나 쓰거나 기존 표현을 바꾸는 방식으로 넣으세요. "
+    "[문체 규칙]이 주어지면 그 규칙(호칭, 그 말을 쓰는 횟수 등)이 키워드 횟수보다 우선입니다 — "
+    "규칙과 부딪치면 횟수를 덜 채운 채로 두세요. 텍스트 중간에 "
     "`[IMAGE: 경로]` 형식의 태그가 있다면, 이것은 사진이 삽입될 위치를 표시하는 마크업이므로 "
     "절대 삭제하거나 수정하거나 다른 곳으로 옮기지 말고 원래 있던 위치에 글자 그대로 "
     "유지하세요. 다른 설명은 절대 덧붙이지 마세요."
@@ -127,6 +133,41 @@ def _weight_of(keyword: str, weights: dict | None) -> float:
         return float((weights or {}).get(keyword, DEFAULT_KEYWORD_WEIGHT))
     except (TypeError, ValueError):
         return DEFAULT_KEYWORD_WEIGHT
+
+
+# 키워드 끝에 붙는 일반어. '주간보호센터'를 다루는 메모가 '주간보호'라고만 써도 같은 소재로 봅니다.
+_SUBJECT_SUFFIXES = ("센터", "서비스", "신청방법", "신청", "방법", "기준", "혜택", "찾기")
+
+
+def _token_in_subject(token: str, subject: str, areas: set) -> bool:
+    if token in areas or token in subject:
+        return True
+    return any(
+        token.endswith(suffix) and len(token) - len(suffix) >= 2 and token[: -len(suffix)] in subject
+        for suffix in _SUBJECT_SUFFIXES
+    )
+
+
+def subject_keywords(keywords: list[str], subject: str, areas: list[str] | None = None) -> list[str]:
+    """Keywords that the post's own subject (the memo, the news article) is about.
+
+    Only these may be forced into the title. The title backstop used to put the
+    top target in regardless — and a target is picked from what the *draft*
+    mentions, which includes the background every post carries (이용 대상:
+    장기요양등급 …). Measured on 2026-11-03: a memo about a 실버미술 class came
+    back titled '장기요양등급 활용으로 만난 가을 단풍 그리기 시간'. A keyword is
+    on-subject when every word of it appears in the subject text (spaces
+    ignored; a service-area name counts as present, since every post is about
+    this centre's area; a generic ending like '센터' may be dropped).
+    """
+    text = re.sub(r"\s+", "", subject or "")
+    if not text:
+        return []
+    area_set = {a.replace(" ", "") for a in (areas or []) if a.strip()}
+    return [
+        kw for kw in keywords
+        if kw.split() and all(_token_in_subject(t, text, area_set) for t in kw.split())
+    ]
 
 
 def title_candidates(
@@ -397,6 +438,7 @@ def rewrite_title_for_keyword(
 def rebalance_keywords(
     title: str, content: str, keywords: list[str], vendor: str,
     minimum: int = MIN_COUNT, maximum: int = MAX_COUNT, enforce: bool = True,
+    style_rules: str = "",
 ) -> tuple[str, dict]:
     """Returns (final_content, density_report). Only rebalances the body —
     the title is left untouched to avoid the fragility of asking an LLM to
@@ -422,6 +464,8 @@ def rebalance_keywords(
         issue_desc.append(f"과다 사용된 키워드(각 {maximum}회 이하로 축소): {', '.join(report['overused'])}")
 
     prompt = f"[본문]\n{content}\n\n[조정 필요 사항]\n" + "\n".join(issue_desc)
+    if style_rules.strip():
+        prompt += f"\n\n[문체 규칙 — 브랜드 킷 톤앤매너]\n{style_rules.strip()}"
     try:
         # The whole body comes back, so the ceiling scales with it (~1 token
         # per Korean character with spaces, plus headroom) instead of a
